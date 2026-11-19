@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 21 · Santa's Route</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#0c1426; font-family:system-ui,sans-serif; color:#eef3ff; user-select:none; }
+  #c { display:block; width:100vw; height:100vh; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:3; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  #hud { position:fixed; top:10px; left:50%; transform:translateX(-50%); text-align:center; pointer-events:none; z-index:2; width:max-content; max-width:92vw; }
+  #title { font-family:Georgia,serif; font-size:clamp(1.2rem,3.4vw,1.9rem); color:#ffd88a; text-shadow:0 0 18px #ffb84d66; }
+  #stats { font-size:13px; color:#cfe0ffcc; margin-top:4px; font-variant-numeric:tabular-nums; }
+  #stats b { color:#fff; }
+  #msg { font-size:14px; margin-top:6px; color:#ffe7b0; min-height:1.2em; text-shadow:0 1px 4px #000; }
+  #chart { position:fixed; right:14px; bottom:66px; width:260px; height:90px; background:#0009; border:1px solid #ffffff1f; border-radius:10px; z-index:2; display:none; }
+  .bar { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:center; align-items:center; width:max-content; max-width:94vw; }
+  .bar > * { background:#000b; color:#eef3ff; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; }
+  .bar button { cursor:pointer; }
+  .bar button.on { background:#ffd88a; color:#1a1200; }
+  .bar label { display:flex; gap:6px; align-items:center; }
+  .bar input { width:80px; }
+  @media (max-width:640px) { #chart { display:none !important; } }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div id="hud"><div id="title">Santa's Route</div><div id="stats"></div><div id="msg"></div></div>
+<canvas id="c"></canvas>
+<canvas id="chart"></canvas>
+<div class="bar">
+  <button id="newv">New village</button>
+  <select id="count" title="Houses"><option value="30">30 houses</option><option value="60" selected>60 houses</option><option value="120">120 houses</option><option value="250">250 houses</option></select>
+  <button id="draw">✏ Draw your own</button>
+  <button id="solve">▶ Let the AI plan it</button>
+  <button id="go">🛷 Deliver!</button>
+  <label>Speed <input id="spd" type="range" min="0.25" max="4" step="0.05" value="1"></label>
+  <button id="snd">🔔 Sound: off</button>
+</div>
+<script>
+// Santa has one night and N chimneys. Which order is shortest? That's the travelling
+// salesman problem. Here a simulated-annealing search untangles a random route live.
+const MW = 1000, MH = 640, KM = 0.02;               // world size in units; 1 unit = 20 m
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const bg = document.createElement('canvas'), bctx = bg.getContext('2d');
+const chart = document.getElementById('chart'), cctx = chart.getContext('2d');
+const $ = id => document.getElementById(id);
+let W, H, DPR, sc, ox, oy;
+
+const mulberry = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+// ---------- village ----------
+let P = [], n = 0, D, lake, trees = [];
+let tour, best, curLen = 0, bestLen = Infinity, elfLen = 0, solved = false;
+let mode = 'idle', step = 0, TOTAL = 1, T0 = 1, T1 = 1, temp = 0, hist = [];
+let mine = [], mineLen = null, lit, presents = [], deliver = null;
+
+function makeVillage(count, seed) {
+  const r = mulberry(seed);
+  const g = () => { let u = 0; for (let i = 0; i < 4; i++) u += r(); return (u - 2) / 0.577; };   // ~N(0,1)
+  lake = { x: 200 + r() * 600, y: 180 + r() * 280, rx: 70 + r() * 60, ry: 40 + r() * 30 };
+  const inLake = (x, y, m) => ((x - lake.x) / (lake.rx + m)) ** 2 + ((y - lake.y) / (lake.ry + m)) ** 2 < 1;
+  const k = Math.round(count / 14) + 2, centres = [];
+  for (let i = 0; i < k; i++) centres.push({ x: 90 + r() * (MW - 180), y: 80 + r() * (MH - 160) });
+  P = [{ x: 60 + r() * 80, y: 60 + r() * 60, workshop: true }];        // the workshop is stop 0
+  const minD = count > 150 ? 16 : 24;
+  let tries = 0;
+  while (P.length < count + 1 && tries++ < 40000) {
+    let x, y;
+    if (r() < 0.8) { const c = centres[(r() * k) | 0], s = 30 + (count > 150 ? 40 : 25); x = c.x + g() * s; y = c.y + g() * s; }
+    else { x = 30 + r() * (MW - 60); y = 30 + r() * (MH - 60); }
+    if (x < 25 || y < 25 || x > MW - 25 || y > MH - 25 || inLake(x, y, 14)) continue;
+    if (P.some(p => (p.x - x) ** 2 + (p.y - y) ** 2 < minD * minD)) continue;
+    P.push({ x, y, hue: (r() * 6) | 0, flip: r() < 0.5 });
+  }
+  n = P.length;
+  D = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) D[i * n + j] = Math.hypot(P[i].x - P[j].x, P[i].y - P[j].y);
+  trees = [];
+  for (let i = 0; i < 520 && trees.length < 340; i++) {
+    const x = r() * MW, y = r() * MH, s = 6 + r() * 9;
+    if (inLake(x, y, 8) || P.some(p => (p.x - x) ** 2 + (p.y - y) ** 2 < 22 * 22)) continue;
+    trees.push({ x, y, s });
+  }
+  trees.sort((a, b) => a.y - b.y);
+  // Start from a random order: a tangled mess.
+  tour = new Int32Array(n); for (let i = 0; i < n; i++) tour[i] = i;
+  for (let i = n - 1; i > 1; i--) { const j = 1 + ((r() * i) | 0); [tour[i], tour[j]] = [tour[j], tour[i]]; }
+  best = tour.slice(); curLen = bestLen = tourLen(tour); solved = false;
+  elfLen = tourLen(greedy());
+  mine = [0]; mineLen = null; lit = new Uint8Array(n); presents = []; deliver = null; hist = [];
+  setMode('idle');
+  paintBg(); stats();
+  say('Santa needs the shortest way round every house. Draw your own route, then see if the AI beats you.');
+}
+
+function tourLen(t) { let s = 0; for (let i = 0; i < t.length; i++) s += D[t[i] * n + t[(i + 1) % t.length]]; return s; }
+function greedy() {     // the "elf" plan: always fly to the nearest house you haven't visited
+  const seen = new Uint8Array(n), t = [0]; seen[0] = 1;
+  for (let k = 1; k < n; k++) {
+    const a = t[k - 1]; let bj = -1, bd = Infinity;
+    for (let j = 0; j < n; j++) if (!seen[j] && D[a * n + j] < bd) { bd = D[a * n + j]; bj = j; }
+    seen[bj] = 1; t.push(bj);
+  }
+  return t;
+}
+
+// ---------- simulated annealing with 2-opt moves ----------
+// A 2-opt move cuts the loop in two places and reconnects it the other way, reversing
+// the bit in between. Downhill moves are always taken; uphill ones are taken with
+// probability exp(-Δ/T), and T slowly cools, so the search can escape early dead ends.
+function startSolve() {
+  if (n < 4) return;
+  let nn = 0;
+  for (let i = 0; i < n; i++) { let m = Infinity; for (let j = 0; j < n; j++) if (j !== i) m = Math.min(m, D[i * n + j]); nn += m; }
+  nn /= n;
+  T0 = nn * 2.2; T1 = nn * 0.004;
+  TOTAL = Math.max(250000, n * n * 45); step = 0; hist = [];
+  for (let i = n - 1; i > 1; i--) { const j = 1 + ((Math.random() * i) | 0); [tour[i], tour[j]] = [tour[j], tour[i]]; }
+  curLen = bestLen = tourLen(tour); best = tour.slice(); solved = false;
+  setMode('solve');
+  say('Shuffling into a random route first. Then watch it untangle itself…');
+}
+function reverse(t, i, j) { while (i < j) { const x = t[i]; t[i] = t[j]; t[j] = x; i++; j--; } }
+function anneal(iters) {
+  let improved = false;
+  for (let k = 0; k < iters && step < TOTAL; k++, step++) {
+    if ((k & 255) === 0) temp = T0 * Math.pow(T1 / T0, step / TOTAL);
+    let i = 1 + ((Math.random() * (n - 1)) | 0), j = 1 + ((Math.random() * (n - 1)) | 0);
+    if (i === j) continue;
+    if (i > j) { const x = i; i = j; j = x; }
+    const a = tour[i - 1], b = tour[i], c = tour[j], d = tour[(j + 1) % n];
+    const delta = D[a * n + c] + D[b * n + d] - D[a * n + b] - D[c * n + d];
+    if (delta < 0 || Math.random() < Math.exp(-delta / temp)) {
+      reverse(tour, i, j); curLen += delta;
+      if (curLen < bestLen - 1e-9) { bestLen = curLen; best.set(tour); improved = true; }
+    }
+  }
+  hist.push([curLen, temp]);
+  if (step >= TOTAL) {           // final polish: plain 2-opt until nothing improves
+    tour.set(best); polish(tour); best.set(tour); curLen = bestLen = tourLen(best);
+    solved = true; setMode('idle'); ding(880, 0.25); ding(1320, 0.2, 0.12);
+    const vs = mineLen ? (mineLen <= bestLen + 0.5 ? ` You beat it (or tied)! Yours: ${km(mineLen)}.` : ` Yours was ${((mineLen / bestLen - 1) * 100).toFixed(1)}% longer.`) : '';
+    say(`Done: ${km(bestLen)}, ${((1 - bestLen / elfLen) * 100).toFixed(1)}% shorter than the elf's nearest-house-first plan.${vs} Press 🛷 Deliver!`);
+  }
+  return improved;
+}
+function polish(t) {
+  for (let pass = 0, imp = true; imp && pass < 50; pass++) {
+    imp = false;
+    for (let i = 1; i < n - 1; i++) for (let j = i + 1; j < n; j++) {
+      const a = t[i - 1], b = t[i], c = t[j], d = t[(j + 1) % n];
+      if (D[a * n + c] + D[b * n + d] - D[a * n + b] - D[c * n + d] < -1e-9) { reverse(t, i, j); imp = true; }
+    }
+  }
+}
+
+// ---------- drawing ----------
+const W2S = (x, y) => [ox + x * sc, oy + y * sc];
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const topPad = 92, botPad = 64;
+  sc = Math.max(0.05, Math.min((W - 24) / MW, (H - topPad - botPad) / MH));
+  ox = (W - MW * sc) / 2; oy = topPad + (H - topPad - botPad - MH * sc) / 2;
+  chart.width = 260 * DPR; chart.height = 90 * DPR; cctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (n) paintBg();
+}
+function paintBg() {
+  bg.width = W * DPR; bg.height = H * DPR; bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const g = bctx.createRadialGradient(W / 2, H * 0.4, 0, W / 2, H * 0.4, Math.max(W, H) * 0.8);
+  g.addColorStop(0, '#22335a'); g.addColorStop(1, '#0a1122');
+  bctx.fillStyle = g; bctx.fillRect(0, 0, W, H);
+  // the snowfield
+  bctx.save(); bctx.beginPath(); bctx.roundRect(ox, oy, MW * sc, MH * sc, 18 * sc); bctx.clip();
+  const s = bctx.createLinearGradient(0, oy, 0, oy + MH * sc);
+  s.addColorStop(0, '#3a4f7c'); s.addColorStop(1, '#2a3b62');
+  bctx.fillStyle = s; bctx.fillRect(ox, oy, MW * sc, MH * sc);
+  const r = mulberry(7);
+  for (let i = 0; i < 1600; i++) { bctx.fillStyle = `rgba(255,255,255,${r() * 0.12})`; bctx.fillRect(ox + r() * MW * sc, oy + r() * MH * sc, 1.2, 1.2); }
+  // frozen lake
+  const [lx, ly] = W2S(lake.x, lake.y);
+  const lg = bctx.createRadialGradient(lx - lake.rx * sc * 0.3, ly - lake.ry * sc * 0.4, 2, lx, ly, lake.rx * sc);
+  lg.addColorStop(0, '#9cc4e8'); lg.addColorStop(1, '#4f7aa8');
+  bctx.fillStyle = lg; bctx.beginPath(); bctx.ellipse(lx, ly, lake.rx * sc, lake.ry * sc, 0, 0, 7); bctx.fill();
+  bctx.strokeStyle = '#d8ecff55'; bctx.lineWidth = 2; bctx.stroke();
+  bctx.strokeStyle = '#ffffff30'; bctx.lineWidth = 1;
+  for (let i = 0; i < 5; i++) { bctx.beginPath(); const a = r() * 6.28; bctx.moveTo(lx + Math.cos(a) * lake.rx * sc * 0.2, ly + Math.sin(a) * lake.ry * sc * 0.2); bctx.lineTo(lx + Math.cos(a + 0.4) * lake.rx * sc * 0.75, ly + Math.sin(a + 0.4) * lake.ry * sc * 0.75); bctx.stroke(); }
+  // pines
+  for (const t of trees) {
+    const [x, y] = W2S(t.x, t.y), h = t.s * sc * 1.6, w = t.s * sc * 0.75;
+    bctx.fillStyle = '#00000033'; bctx.beginPath(); bctx.ellipse(x + w * 0.4, y + 1, w * 0.9, w * 0.3, 0, 0, 7); bctx.fill();
+    bctx.fillStyle = '#163a2e'; bctx.beginPath(); bctx.moveTo(x, y - h); bctx.lineTo(x + w, y); bctx.lineTo(x - w, y); bctx.fill();
+    bctx.fillStyle = '#e8f2ffcc'; bctx.beginPath(); bctx.moveTo(x, y - h); bctx.lineTo(x + w * 0.35, y - h * 0.62); bctx.lineTo(x - w * 0.35, y - h * 0.62); bctx.fill();
+  }
+  bctx.restore();
+}
+const ROOF = ['#b3202a', '#1f6b3a', '#1c3f8f', '#8a1d5a', '#a35a12', '#13626b'];
+function drawHouse(p, isLit, t) {
+  const [x, y] = W2S(p.x, p.y), s = Math.max(5, 9 * sc);
+  if (p.workshop) {
+    const k = s * 1.7;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, k * 4);
+    glow.addColorStop(0, 'rgba(255,210,120,0.45)'); glow.addColorStop(1, 'rgba(255,210,120,0)');
+    ctx.fillStyle = glow; ctx.fillRect(x - k * 4, y - k * 4, k * 8, k * 8);
+    ctx.fillStyle = '#6b3a1e'; ctx.fillRect(x - k, y - k * 0.6, k * 2, k * 1.2);
+    ctx.fillStyle = '#b3202a'; ctx.beginPath(); ctx.moveTo(x - k * 1.25, y - k * 0.55); ctx.lineTo(x, y - k * 1.5); ctx.lineTo(x + k * 1.25, y - k * 0.55); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x - k * 0.9, y - k * 0.85); ctx.lineTo(x, y - k * 1.5); ctx.lineTo(x + k * 0.9, y - k * 0.85); ctx.fill();
+    ctx.fillStyle = '#ffd36b'; ctx.fillRect(x - k * 0.55, y - k * 0.25, k * 0.4, k * 0.4); ctx.fillRect(x + k * 0.15, y - k * 0.25, k * 0.4, k * 0.4);
+    star(x, y - k * 1.75, k * 0.45, t);
+    return;
+  }
+  const w = s, h = s * 0.75, fl = p.flip ? -1 : 1;
+  ctx.fillStyle = '#00000044'; ctx.beginPath(); ctx.ellipse(x + w * 0.3, y + h * 0.55, w * 0.9, h * 0.3, 0, 0, 7); ctx.fill();
+  if (isLit) {
+    const gl = ctx.createRadialGradient(x, y, 0, x, y, s * 2.4);
+    gl.addColorStop(0, 'rgba(255,200,100,0.42)'); gl.addColorStop(1, 'rgba(255,200,100,0)');
+    ctx.fillStyle = gl; ctx.fillRect(x - s * 2.4, y - s * 2.4, s * 4.8, s * 4.8);
+  }
+  ctx.fillStyle = '#8a6a50'; ctx.fillRect(x - w / 2, y - h / 2, w, h);
+  ctx.fillStyle = ROOF[p.hue]; ctx.beginPath(); ctx.moveTo(x - w * 0.65, y - h * 0.45); ctx.lineTo(x, y - h * 1.25); ctx.lineTo(x + w * 0.65, y - h * 0.45); ctx.fill();
+  ctx.fillStyle = '#eef6ff'; ctx.beginPath(); ctx.moveTo(x - w * 0.42, y - h * 0.7); ctx.lineTo(x, y - h * 1.25); ctx.lineTo(x + w * 0.42, y - h * 0.7); ctx.fill();
+  ctx.fillStyle = '#5a3a28'; ctx.fillRect(x + fl * w * 0.18 - w * 0.07, y - h * 1.15, w * 0.14, h * 0.4);    // chimney
+  ctx.fillStyle = isLit ? '#ffd36b' : '#26304a'; ctx.fillRect(x - fl * w * 0.22 - w * 0.12, y - h * 0.18, w * 0.24, h * 0.3);
+}
+function star(x, y, r, t) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(t / 900) * 0.15);
+  ctx.fillStyle = '#ffe9a0'; ctx.shadowColor = '#ffd36b'; ctx.shadowBlur = 14;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+  ctx.fill(); ctx.restore();
+}
+function path(t, closed) {
+  ctx.beginPath();
+  for (let i = 0; i < t.length; i++) { const [x, y] = W2S(P[t[i]].x, P[t[i]].y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  if (closed) ctx.closePath();
+}
+function drawRoute(t, closed, color, width, glow) {
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  if (glow) { path(t, closed); ctx.strokeStyle = glow; ctx.lineWidth = width * 4; ctx.stroke(); }
+  path(t, closed); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+}
+function sleigh(x, y, ang) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  const s = Math.max(0.7, sc * 1.1);
+  ctx.scale(s, s);
+  ctx.fillStyle = 'rgba(255,220,140,0.35)'; ctx.beginPath(); ctx.arc(0, 0, 22, 0, 7); ctx.fill();
+  // three reindeer ahead, roped together
+  ctx.strokeStyle = '#e8d2a0'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(38, 0); ctx.stroke();
+  for (let i = 0; i < 3; i++) {
+    const rx = 18 + i * 9, ry = (i % 2 ? 3 : -3);
+    ctx.fillStyle = i === 2 ? '#a0603a' : '#7a4a2a'; ctx.beginPath(); ctx.ellipse(rx, ry, 4, 2.2, 0, 0, 7); ctx.fill();
+    if (i === 2) { ctx.fillStyle = '#ff3b3b'; ctx.beginPath(); ctx.arc(rx + 5, ry, 1.4, 0, 7); ctx.fill(); }
+  }
+  ctx.fillStyle = '#c4202a'; ctx.beginPath(); ctx.roundRect(-10, -6, 16, 12, 3); ctx.fill();
+  ctx.fillStyle = '#ffd36b'; ctx.fillRect(-10, -7, 18, 2); ctx.fillRect(-10, 5, 18, 2);
+  ctx.fillStyle = '#3b7a4a'; ctx.beginPath(); ctx.arc(-4, 0, 4, 0, 7); ctx.fill();   // the sack
+  ctx.restore();
+}
+
+// ---------- falling snow + presents ----------
+const flakes = Array.from({ length: 160 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.6 + 0.4, v: Math.random() * 0.4 + 0.3 }));
+function snow(dt) {
+  ctx.fillStyle = '#fff';
+  for (const f of flakes) {
+    f.y += f.v * dt * 0.06; f.x += Math.sin(f.y * 9 + f.r) * 0.0004;
+    if (f.y > 1) { f.y = 0; f.x = Math.random(); }
+    ctx.globalAlpha = 0.25 + f.r * 0.25; ctx.beginPath(); ctx.arc(f.x * W, f.y * H, f.r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- sound ----------
+let ac = null, soundOn = false;
+function ding(f, vol = 0.18, delay = 0) {
+  if (!soundOn || !ac) return;
+  const t = ac.currentTime + delay;
+  for (const [m, a, d] of [[1, 1, 1.2], [2.76, 0.4, 0.5], [5.4, 0.18, 0.25]]) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = f * m; o.connect(g); g.connect(ac.destination);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol * a, t + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.start(t); o.stop(t + d + 0.05);
+  }
+}
+const PENT = [0, 2, 4, 7, 9];
+const note = k => 523.25 * 2 ** ((Math.floor(k / 5) % 3 * 12 + PENT[k % 5]) / 12);
+
+// ---------- modes ----------
+function setMode(m) {
+  mode = m;
+  $('solve').classList.toggle('on', m === 'solve');
+  $('draw').classList.toggle('on', m === 'draw');
+  $('go').classList.toggle('on', m === 'deliver');
+  chart.style.display = (m === 'solve' || hist.length) ? 'block' : 'none';
+}
+const km = u => (u * KM).toFixed(1) + ' km';
+function stats() {
+  const parts = [`<b>${n - 1}</b> houses`, `Elf's plan (nearest house first): <b>${km(elfLen)}</b>`];
+  if (mode === 'solve') parts.push(`Trying: <b>${km(curLen)}</b>`, `Best: <b>${km(bestLen)}</b>`, `Temperature: <b>${(temp / T0 * 100).toFixed(1)}°</b>`);
+  else if (solved) parts.push(`AI: <b>${km(bestLen)}</b>`);
+  if (mineLen) parts.push(`Yours: <b>${km(mineLen)}</b>`);
+  else if (mode === 'draw') parts.push(`Yours so far: <b>${mine.length - 1}</b> / ${n - 1}`);
+  if (deliver) parts.push(`Delivered: <b>${deliver.count}</b> / ${n - 1}`);
+  $('stats').innerHTML = parts.join(' · ');
+}
+function say(s) { $('msg').textContent = s; }
+
+function startDeliver() {
+  let route = null, who = '';
+  if (solved) { route = Array.from(best); who = 'the AI\'s'; }
+  if (mineLen && (!solved || mineLen < bestLen)) { route = mine.slice(); who = 'your'; }
+  if (!route) { say('Plan a route first: draw your own, or let the AI plan it.'); return; }
+  route.push(0);
+  const cum = [0];
+  for (let i = 1; i < route.length; i++) cum.push(cum[i - 1] + D[route[i - 1] * n + route[i]]);
+  lit = new Uint8Array(n); presents = [];
+  deliver = { route, cum, s: 0, next: 1, count: 0, done: false };
+  setMode('deliver');
+  say(`Off we go, flying ${who} route…`);
+}
+
+// ---------- input ----------
+let mouse = null, down = false;
+function nearest(px, py, onlyFree) {
+  let bi = -1, bd = 26 * 26;
+  for (let i = 0; i < n; i++) {
+    if (onlyFree && mine.includes(i)) continue;
+    const [x, y] = W2S(P[i].x, P[i].y), d = (x - px) ** 2 + (y - py) ** 2;
+    if (d < bd) { bd = d; bi = i; }
+  }
+  return bi;
+}
+function tryAdd(px, py) {
+  if (mode !== 'draw' || mineLen) return;
+  const i = nearest(px, py, true);
+  if (i < 0) return;
+  mine.push(i); ding(note(mine.length), 0.1);
+  if (mine.length === n) {
+    mineLen = tourLen(mine); setMode('idle');
+    say(solved ? (mineLen <= bestLen + 0.5 ? `Your route: ${km(mineLen)}. You matched or beat the AI!` : `Your route: ${km(mineLen)}. The AI found ${km(bestLen)}.`)
+               : `Your route: ${km(mineLen)}. Now press ▶ and see if the AI can beat you.`);
+  }
+  stats();
+}
+cv.addEventListener('pointerdown', e => { down = true; mouse = [e.clientX, e.clientY]; tryAdd(e.clientX, e.clientY); });
+addEventListener('pointerup', () => down = false);
+cv.addEventListener('pointermove', e => { mouse = [e.clientX, e.clientY]; if (down) tryAdd(e.clientX, e.clientY); });
+cv.addEventListener('contextmenu', e => { e.preventDefault(); undo(); });
+function undo() { if (mode === 'draw' && mine.length > 1) { mine.pop(); stats(); } }
+addEventListener('keydown', e => { if (e.key === 'Backspace' || (e.key === 'z' && (e.ctrlKey || e.metaKey))) undo(); });
+
+$('newv').onclick = () => makeVillage(+$('count').value, (Math.random() * 1e9) | 0);
+$('count').onchange = () => makeVillage(+$('count').value, (Math.random() * 1e9) | 0);
+$('solve').onclick = () => { if (mode === 'solve') return; deliver = null; lit = new Uint8Array(n); startSolve(); };
+$('draw').onclick = () => {
+  if (mode === 'solve') return;
+  deliver = null; lit = new Uint8Array(n); mine = [0]; mineLen = null; setMode('draw'); stats();
+  say('Start at the workshop ★. Click or drag across houses in the order Santa should visit. Right-click or Backspace undoes.');
+};
+$('go').onclick = () => { if (mode !== 'solve') startDeliver(); };
+$('snd').onclick = () => {
+  soundOn = !soundOn;
+  if (soundOn && !ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+  if (ac && ac.state === 'suspended') ac.resume();
+  $('snd').textContent = soundOn ? '🔔 Sound: on' : '🔔 Sound: off'; $('snd').classList.toggle('on', soundOn);
+};
+
+// ---------- loop ----------
+let last = performance.now(), lastDing = 0;
+function frame(now) {
+  const dt = Math.min(50, now - last); last = now;
+  const spd = +$('spd').value;
+  if (mode === 'solve') {
+    const per = Math.ceil(TOTAL / 600 * spd);         // ~10 s at 1×
+    if (anneal(per) && now - lastDing > 140 && temp < T0 * 0.2) { ding(note((hist.length / 3) | 0) * 0.5, 0.05); lastDing = now; }
+    stats();
+  }
+  if (mode === 'deliver' && deliver && !deliver.done) {
+    const d = deliver;
+    d.s += dt * 0.32 * spd;
+    while (d.next < d.route.length && d.s >= d.cum[d.next]) {
+      const h = d.route[d.next];
+      if (h !== 0) {
+        lit[h] = 1; d.count++; ding(note(d.count % 15), 0.12);
+        for (let k = 0; k < 10; k++) presents.push({ x: P[h].x, y: P[h].y, vx: (Math.random() - 0.5) * 2.4, vy: -Math.random() * 2.6 - 0.6, life: 1, c: ROOF[(Math.random() * 6) | 0] });
+      }
+      d.next++;
+    }
+    if (d.s >= d.cum[d.cum.length - 1]) {
+      d.done = true; d.s = d.cum[d.cum.length - 1];
+      say(`All ${n - 1} presents delivered in ${km(d.cum[d.cum.length - 1])}. Merry Christmas! 🎄`);
+      for (let k = 0; k < 4; k++) ding(note(10 + k * 2), 0.14, k * 0.12);
+      setMode('idle');
+    }
+    stats();
+  }
+
+  ctx.drawImage(bg, 0, 0, W, H);
+  // routes
+  if (mode === 'solve' && hist.length) drawRoute(tour, true, `rgba(255,120,120,${0.35 + 0.5 * (1 - temp / T0)})`, 1.5, null);
+  if (solved && mode !== 'solve') drawRoute(best, true, '#ffd88a', 2, 'rgba(255,200,100,0.12)');
+  if (mine.length > 1) {
+    ctx.setLineDash([6, 5]);
+    drawRoute(mine, !!mineLen, '#8fe3b0', 2, null);
+    ctx.setLineDash([]);
+  }
+  if (mode === 'draw' && mouse && !mineLen) {
+    const [x, y] = W2S(P[mine[mine.length - 1]].x, P[mine[mine.length - 1]].y);
+    ctx.strokeStyle = '#8fe3b066'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(mouse[0], mouse[1]); ctx.stroke();
+    const h = nearest(mouse[0], mouse[1], true);
+    if (h >= 0) { const [hx, hy] = W2S(P[h].x, P[h].y); ctx.strokeStyle = '#8fe3b0'; ctx.beginPath(); ctx.arc(hx, hy, 12, 0, 7); ctx.stroke(); }
+  }
+  // the delivered part of the route glows
+  if (deliver) {
+    const d = deliver, done = d.route.slice(0, d.next);
+    let px = P[0].x, py = P[0].y, ang = 0;
+    if (d.next < d.route.length) {
+      const a = P[d.route[d.next - 1]], b = P[d.route[d.next]], seg = d.cum[d.next] - d.cum[d.next - 1];
+      const f = seg ? (d.s - d.cum[d.next - 1]) / seg : 1;
+      px = a.x + (b.x - a.x) * f; py = a.y + (b.y - a.y) * f; ang = Math.atan2(b.y - a.y, b.x - a.x);
+    }
+    ctx.beginPath();
+    done.forEach((h, i) => { const [x, y] = W2S(P[h].x, P[h].y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    const [sx, sy] = W2S(px, py); ctx.lineTo(sx, sy);
+    ctx.strokeStyle = 'rgba(255,240,200,0.9)'; ctx.lineWidth = 2.5; ctx.shadowColor = '#ffd36b'; ctx.shadowBlur = 10; ctx.stroke(); ctx.shadowBlur = 0;
+    for (let k = 0; k < 2; k++) presents.push({ x: px, y: py, vx: (Math.random() - 0.5) * 0.6, vy: (Math.random() - 0.5) * 0.6, life: 0.7, c: '#fff6d0', spark: true });
+    deliver.pos = [sx, sy, ang];
+  }
+  for (let i = 0; i < n; i++) drawHouse(P[i], lit[i], now);
+  if (mode === 'draw') {      // number the houses you've chosen
+    ctx.font = `${Math.max(9, 10 * sc)}px system-ui`; ctx.fillStyle = '#d9ffe8'; ctx.textAlign = 'center';
+    mine.forEach((h, i) => { if (i) { const [x, y] = W2S(P[h].x, P[h].y); ctx.fillText(i, x, y + 16 * Math.max(0.8, sc)); } });
+  }
+  for (let i = presents.length - 1; i >= 0; i--) {
+    const p = presents[i]; p.x += p.vx * dt * 0.06; p.y += p.vy * dt * 0.06; if (!p.spark) p.vy += 0.004 * dt;
+    p.life -= dt * (p.spark ? 0.0018 : 0.0012);
+    if (p.life <= 0) { presents.splice(i, 1); continue; }
+    const [x, y] = W2S(p.x, p.y);
+    ctx.globalAlpha = p.life; ctx.fillStyle = p.c;
+    p.spark ? ctx.fillRect(x - 1, y - 1, 2, 2) : ctx.fillRect(x - 2.5, y - 2.5, 5, 5);
+  }
+  ctx.globalAlpha = 1;
+  if (deliver && deliver.pos) sleigh(...deliver.pos);
+  snow(dt);
+  drawChart();
+  requestAnimationFrame(frame);
+}
+function drawChart() {
+  if (chart.style.display === 'none' || hist.length < 2) return;
+  const w = 260, h = 90, pad = 8;
+  cctx.clearRect(0, 0, w, h);
+  let lo = Math.min(bestLen, elfLen) * 0.97, hi = Math.max(...hist.slice(0, 40).map(v => v[0]), elfLen * 1.1);
+  const Y = v => h - pad - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * (h - pad * 2 - 10);
+  const X = i => pad + i / Math.max(hist.length - 1, 1) * (w - pad * 2) * Math.min(1, hist.length / 600);
+  cctx.fillStyle = 'rgba(255,90,60,0.18)'; cctx.beginPath(); cctx.moveTo(X(0), h - pad);
+  hist.forEach((v, i) => cctx.lineTo(X(i), h - pad - v[1] / T0 * (h - pad * 2 - 10)));
+  cctx.lineTo(X(hist.length - 1), h - pad); cctx.fill();
+  cctx.strokeStyle = '#7fb2ff'; cctx.setLineDash([4, 4]); cctx.beginPath(); cctx.moveTo(pad, Y(elfLen)); cctx.lineTo(w - pad, Y(elfLen)); cctx.stroke(); cctx.setLineDash([]);
+  cctx.strokeStyle = '#ffd88a'; cctx.lineWidth = 1.5; cctx.beginPath();
+  hist.forEach((v, i) => i ? cctx.lineTo(X(i), Y(v[0])) : cctx.moveTo(X(i), Y(v[0]))); cctx.stroke();
+  cctx.font = '10px system-ui'; cctx.fillStyle = '#ffd88a'; cctx.fillText('route length', pad + 2, 12);
+  cctx.fillStyle = '#7fb2ff'; cctx.fillText('elf', w - 26, Y(elfLen) - 3);
+  cctx.fillStyle = '#ff8a6a'; cctx.fillText('temperature', w - 70, 12);
+}
+
+size(); addEventListener('resize', size);
+makeVillage(60, (Math.random() * 1e9) | 0);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 12 · Hot Cocoa</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#2b1a10; font-family:system-ui,sans-serif; color:#fbeedd; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; cursor:crosshair; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .tools { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:center; width:max-content; max-width:94vw; }
+  .tools button { background:#000a; color:#fbeedd; border:1px solid #ffffff26; border-radius:10px; padding:8px 12px; font:inherit; font-size:14px; cursor:pointer; }
+  .tools button.on { background:#f3d6a8; color:#2b1a10; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<canvas id="c"></canvas>
+<div class="tools" id="tools"></div>
+<script>
+// ---------- a "stable fluids" solver (Jos Stam, 1999) on a 128×128 grid ----------
+const S = 128, N = S + 2, SZ = N * N, IX = (i, j) => i + N * j;
+let u = new Float32Array(SZ), v = new Float32Array(SZ), u0 = new Float32Array(SZ), v0 = new Float32Array(SZ);
+let cream = new Float32Array(SZ), cream0 = new Float32Array(SZ), cin = new Float32Array(SZ), cin0 = new Float32Array(SZ);
+const p = new Float32Array(SZ), div = new Float32Array(SZ), curl = new Float32Array(SZ), inside = new Uint8Array(SZ);
+const RAD = S / 2 - 1.5, CX = (S + 1) / 2;
+for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) inside[IX(i, j)] = Math.hypot(i - CX, j - CX) < RAD ? 1 : 0;
+
+function sample(f, x, y) {           // bilinear lookup
+  x = Math.max(0.5, Math.min(S + 0.5, x)); y = Math.max(0.5, Math.min(S + 0.5, y));
+  const i = x | 0, j = y | 0, s = x - i, t = y - j;
+  return (1 - s) * ((1 - t) * f[IX(i, j)] + t * f[IX(i, j + 1)]) + s * ((1 - t) * f[IX(i + 1, j)] + t * f[IX(i + 1, j + 1)]);
+}
+function advect(d, d0, dt, fade = 1) {   // semi-Lagrangian: look back along the flow and copy what was there
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+    const k = IX(i, j);
+    d[k] = inside[k] ? sample(d0, i - u0[k] * dt, j - v0[k] * dt) * fade : 0;
+  }
+}
+function project() {                 // make the flow incompressible: liquid can't pile up or vanish
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+    const k = IX(i, j);
+    div[k] = -0.5 * (u[k + 1] - u[k - 1] + v[k + N] - v[k - N]); p[k] = 0;
+  }
+  for (let it = 0; it < 22; it++)
+    for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+      const k = IX(i, j);
+      if (inside[k]) p[k] = (div[k] + p[k - 1] + p[k + 1] + p[k - N] + p[k + N]) / 4;
+    }
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+    const k = IX(i, j);
+    if (!inside[k]) { u[k] = v[k] = 0; continue; }
+    u[k] -= 0.5 * (p[k + 1] - p[k - 1]); v[k] -= 0.5 * (p[k + N] - p[k - N]);
+  }
+}
+function vorticity(dt, eps) {        // put back the little swirls that numerical blur smooths away
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) { const k = IX(i, j); curl[k] = 0.5 * ((v[k + 1] - v[k - 1]) - (u[k + N] - u[k - N])); }
+  for (let j = 2; j < S; j++) for (let i = 2; i < S; i++) {
+    const k = IX(i, j); if (!inside[k]) continue;
+    let nx = 0.5 * (Math.abs(curl[k + 1]) - Math.abs(curl[k - 1])), ny = 0.5 * (Math.abs(curl[k + N]) - Math.abs(curl[k - N]));
+    const l = Math.hypot(nx, ny) + 1e-5; nx /= l; ny /= l;
+    u[k] += eps * ny * curl[k] * dt; v[k] -= eps * nx * curl[k] * dt;
+  }
+}
+function step(dt) {
+  vorticity(dt, 9);
+  project();
+  [u0, u] = [u, u0]; [v0, v] = [v, v0];
+  advect(u, u0, dt, 0.996); advect(v, v0, dt, 0.996);
+  project();
+  [cream0, cream] = [cream, cream0]; [cin0, cin] = [cin, cin0];
+  [u0, u] = [u, u0]; [v0, v] = [v, v0];      // advect the dyes with the new velocity
+  advect(cream, cream0, dt); advect(cin, cin0, dt, 0.9995);
+  [u0, u] = [u, u0]; [v0, v] = [v, v0];
+}
+
+// ---------- the cup ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const fl = document.createElement('canvas'); fl.width = fl.height = S; const flx = fl.getContext('2d'), img = flx.createImageData(S, S);
+let W, H, DPR, D, cx0, cy0, table, mallows = [], steam = [], tool = 'stir';
+
+function freshCup() {
+  u.fill(0); v.fill(0); cream.fill(0); cin.fill(0);
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+    const k = IX(i, j), dx = i - CX, dy = j - CX, r = Math.hypot(dx, dy);
+    if (!inside[k]) continue;
+    u[k] = -dy * 0.35; v[k] = dx * 0.35;                         // a gentle swirl from the spoon
+    cream[k] = Math.max(0, 1 - Math.hypot(dx - 10, dy + 6) / 16) * 1.3;   // a dollop of cream
+  }
+  mallows = [[-25, -20], [22, -26], [-18, 28], [28, 18]].map(([x, y]) => newMallow(CX + x, CX + y));
+}
+function newMallow(x, y) { return { x, y, a: Math.random() * 2, s: 11 + Math.random() * 3 }; }
+
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  D = Math.min(W * 0.78, H * 0.72); cx0 = W / 2 - D * 0.06; cy0 = H / 2 - 20;
+  table = document.createElement('canvas'); table.width = W; table.height = H; const g = table.getContext('2d');
+  g.fillStyle = '#5a3620'; g.fillRect(0, 0, W, H);
+  for (let y = 0; y < H; y += 90) {                              // wooden planks with grain
+    g.fillStyle = `hsl(24,${40 + Math.random() * 10}%,${18 + Math.random() * 6}%)`; g.fillRect(0, y, W, 88);
+    g.strokeStyle = '#00000022';
+    for (let k = 0; k < 14; k++) { g.beginPath(); const yy = y + Math.random() * 88; g.moveTo(0, yy); for (let x = 0; x < W; x += 40) g.lineTo(x, yy + Math.sin(x * 0.01 + k) * 3); g.stroke(); }
+  }
+  const vig = g.createRadialGradient(W / 2, H / 2, D * 0.3, W / 2, H / 2, Math.hypot(W, H) / 1.6);
+  vig.addColorStop(0, '#0000'); vig.addColorStop(1, '#000a'); g.fillStyle = vig; g.fillRect(0, 0, W, H);
+}
+
+function render(time) {
+  const d = img.data;
+  for (let j = 1; j <= S; j++) for (let i = 1; i <= S; i++) {
+    const k = IX(i, j), o = ((j - 1) * S + i - 1) * 4;
+    const c = Math.min(1, cream[k]), n = Math.min(1, cin[k]);
+    const gx = cream[k + 1] - cream[k - 1], gy = cream[k + N] - cream[k - N];
+    const shade = 1 - (gx + gy) * 0.35;                         // fake lighting from the cream's slopes
+    let r = 92 + (238 - 92) * c, g = 50 + (214 - 50) * c, b = 28 + (184 - 28) * c;
+    r = r * (1 - n * 0.55); g = g * (1 - n * 0.65); b = b * (1 - n * 0.75);
+    d[o] = r * shade; d[o + 1] = g * shade; d[o + 2] = b * shade; d[o + 3] = 255;
+  }
+  flx.putImageData(img, 0, 0);
+  ctx.drawImage(table, 0, 0, W, H);
+  const R = D / 2, cell = D / S;
+  // mug: shadow, handle, rim
+  ctx.fillStyle = '#0006'; ctx.beginPath(); ctx.arc(cx0 + 12, cy0 + 16, R * 1.12, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#b3202a'; ctx.lineWidth = R * 0.16; ctx.beginPath(); ctx.arc(cx0 + R * 1.18, cy0, R * 0.32, -2, 2); ctx.stroke();
+  ctx.fillStyle = '#b3202a'; ctx.beginPath(); ctx.arc(cx0, cy0, R * 1.1, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff'; for (let a = 0; a < 7; a += 0.52) { ctx.beginPath(); ctx.arc(cx0 + Math.cos(a) * R * 1.05, cy0 + Math.sin(a) * R * 1.05, R * 0.018, 0, 7); ctx.fill(); }
+  ctx.fillStyle = '#f2e9de'; ctx.beginPath(); ctx.arc(cx0, cy0, R * 1.02, 0, 7); ctx.fill();
+  // the cocoa itself
+  ctx.save(); ctx.beginPath(); ctx.arc(cx0, cy0, R * 0.985, 0, 7); ctx.clip();
+  ctx.imageSmoothingEnabled = true; ctx.drawImage(fl, cx0 - R, cy0 - R, D, D);
+  for (const m of mallows) {                                  // marshmallows bobbing on the surface
+    const x = cx0 - R + (m.x - 0.5) * cell, y = cy0 - R + (m.y - 0.5) * cell, s = m.s * cell;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(m.a);
+    ctx.fillStyle = '#0003'; ctx.beginPath(); ctx.roundRect(-s / 2 + 3, -s / 2 + 4, s, s, s * 0.3); ctx.fill();
+    const mg = ctx.createLinearGradient(-s / 2, -s / 2, s / 2, s / 2); mg.addColorStop(0, '#ffffff'); mg.addColorStop(1, '#e9dccb');
+    ctx.fillStyle = mg; ctx.beginPath(); ctx.roundRect(-s / 2, -s / 2, s, s, s * 0.3); ctx.fill();
+    ctx.restore();
+  }
+  const depth = ctx.createRadialGradient(cx0, cy0, R * 0.7, cx0, cy0, R); depth.addColorStop(0, '#0000'); depth.addColorStop(1, '#0007');
+  ctx.fillStyle = depth; ctx.fillRect(cx0 - R, cy0 - R, D, D);
+  ctx.fillStyle = '#ffffff1c'; ctx.beginPath(); ctx.ellipse(cx0 - R * 0.35, cy0 - R * 0.45, R * 0.28, R * 0.12, -0.6, 0, 7); ctx.fill();
+  ctx.restore();
+  // steam drifting up off the surface
+  for (const s of steam) {
+    const gr = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+    gr.addColorStop(0, `rgba(255,255,255,${0.07 * s.life})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill();
+  }
+}
+
+function updateExtras(dt, time) {
+  for (const m of mallows) {
+    const vx = sample(u, m.x, m.y), vy = sample(v, m.x, m.y);
+    m.x += vx * dt * 0.9; m.y += vy * dt * 0.9; m.a += sample(curl, m.x, m.y) * dt * 0.8;
+    const dx = m.x - CX, dy = m.y - CX, r = Math.hypot(dx, dy), lim = RAD - m.s * 0.75;
+    if (r > lim) { m.x = CX + dx / r * lim; m.y = CX + dy / r * lim; }
+    for (const o of mallows) if (o !== m) {
+      const ex = m.x - o.x, ey = m.y - o.y, e = Math.hypot(ex, ey) + 1e-3, min = (m.s + o.s) * 0.55;
+      if (e < min) { m.x += ex / e * (min - e) * 0.5; m.y += ey / e * (min - e) * 0.5; }
+    }
+    const k = IX(Math.round(m.x), Math.round(m.y));             // slowly melting into the cocoa
+    if (inside[k]) cream[k] = Math.min(1.3, cream[k] + 0.012);
+  }
+  if (Math.random() < 0.5) {
+    const a = Math.random() * 7, rr = Math.sqrt(Math.random()) * D * 0.45;
+    steam.push({ x: cx0 + Math.cos(a) * rr, y: cy0 + Math.sin(a) * rr, r: 20 + Math.random() * 30, life: 1, ph: Math.random() * 7 });
+  }
+  for (const s of steam) { s.y -= 18 * dt; s.x += Math.sin(time * 1.3 + s.ph) * 12 * dt; s.r += 14 * dt; s.life -= dt * 0.35; }
+  steam = steam.filter(s => s.life > 0);
+}
+
+// ---------- input ----------
+let mouse = null;
+function toGrid(e) { return { x: (e.clientX - (cx0 - D / 2)) / D * S + 0.5, y: (e.clientY - (cy0 - D / 2)) / D * S + 0.5 }; }
+function brush(g, dxg, dyg, dt) {
+  const r = tool === 'cream' ? 5 : 6;
+  for (let j = Math.floor(g.y - r); j <= g.y + r; j++) for (let i = Math.floor(g.x - r); i <= g.x + r; i++) {
+    if (i < 1 || j < 1 || i > S || j > S) continue;
+    const k = IX(i, j); if (!inside[k]) continue;
+    const f = Math.max(0, 1 - Math.hypot(i - g.x, j - g.y) / r);
+    if (!f) continue;
+    if (tool === 'stir' || tool === 'cream') { u[k] += dxg / dt * f * 0.6; v[k] += dyg / dt * f * 0.6; }
+    if (tool === 'cream') { cream[k] = Math.min(1.4, cream[k] + f * 0.5); u[k] += (i - g.x) * f * 2; v[k] += (j - g.y) * f * 2; }
+    if (tool === 'cinnamon' && Math.random() < 0.15 * f) cin[k] = 1;
+  }
+}
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId); mouse = toGrid(e);
+  if (tool === 'mallow') {
+    const g = mouse; if (Math.hypot(g.x - CX, g.y - CX) < RAD - 5) { mallows.push(newMallow(g.x, g.y)); if (mallows.length > 14) mallows.shift();
+      for (let a = 0; a < 6.28; a += 0.4) { const k = IX(Math.round(g.x + Math.cos(a) * 6), Math.round(g.y + Math.sin(a) * 6)); if (inside[k]) { u[k] += Math.cos(a) * 40; v[k] += Math.sin(a) * 40; } } }
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (!mouse) return;
+  const g = toGrid(e); mouse.dx = g.x - mouse.x; mouse.dy = g.y - mouse.y; mouse.x = g.x; mouse.y = g.y; mouse.moved = true;
+});
+addEventListener('pointerup', () => mouse = null);
+
+const TOOLS = [['stir', '🥄 Stir'], ['cream', '🥛 Pour cream'], ['cinnamon', '✨ Cinnamon'], ['mallow', '☁️ Marshmallow'], ['fresh', '☕ Fresh cup']];
+const bar = document.getElementById('tools');
+TOOLS.forEach(([id, label], n) => {
+  const b = document.createElement('button'); b.textContent = `${label}`; b.title = `key ${n + 1}`;
+  b.onclick = () => pick(id); bar.appendChild(b);
+});
+function pick(id) { if (id === 'fresh') { freshCup(); return; } tool = id; [...bar.children].forEach((b, i) => b.classList.toggle('on', TOOLS[i][0] === id)); }
+addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= 5) pick(TOOLS[n - 1][0]); });
+
+addEventListener('resize', size);
+size(); freshCup(); pick('stir');
+let last = 0;
+(function loop(now) {
+  const dt = Math.min(0.033, (now - last) / 1000 || 0.016); last = now;
+  if (mouse && (mouse.moved || tool === 'cream' || tool === 'cinnamon')) { brush(mouse, mouse.dx || 0, mouse.dy || 0, dt); mouse.moved = false; mouse.dx = mouse.dy = 0; }
+  step(dt); updateExtras(dt, now / 1000); render(now / 1000);
+  requestAnimationFrame(loop);
+})(0);
+</script>
+</body>
+</html>

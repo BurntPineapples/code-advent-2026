@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 2 · Fairy Lights</title>
+<style>
+  html,body { margin:0; height:100%; background:#0b0606; overflow:hidden; font-family:system-ui,sans-serif; color:#f3e3d0; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; cursor:grab; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); display:flex; gap:6px; flex-wrap:wrap; justify-content:center; width:max-content; max-width:94vw; }
+  .bar button { background:#0009; color:#f3e3d0; border:1px solid #ffffff22; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  .bar button.on { background:#f3c86a; color:#1a0d00; }
+  .hint { position:fixed; top:14px; left:50%; transform:translateX(-50%); font-size:13px; color:#f3e3d0aa; text-align:center; width:max-content; max-width:70vw; transition:opacity 1s; pointer-events:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="hint" id="hint">Grab a wire and swing it · drag across empty space to hang a new string<br>Double-click a wire to cut it, or a hook to unhook it · keys 1–5 change the pattern</div>
+<canvas id="c"></canvas>
+<div class="bar" id="bar"></div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const SEG = 13, G = 0.35, ITER = 12, BULB_EVERY = 3;
+const PALETTE = ['#ff3d3d', '#ffc93d', '#3dff72', '#3dabff', '#ff63e6', '#ff8a2a'];
+const PATTERNS = ['Steady', 'Chase', 'Twinkle', 'Rainbow', 'Breathe'];
+let W, H, DPR, wall, strings = [], pattern = 2, grab = null, drawing = null, mouse = { x: 0, y: 0, px: 0, py: 0 };
+
+function makeString(x1, y1, x2, y2, slack = 1.2, pinEnd = true) {
+  const len = Math.hypot(x2 - x1, y2 - y1) * slack, n = Math.max(4, Math.round(len / SEG));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t;
+    pts.push({ x, y, px: x, py: y, pin: false, ph: Math.random() * 7, sp: 1 + Math.random() * 2 });
+  }
+  pts[0].pin = true; pts[n].pin = pinEnd;
+  return { pts, L: len / n, links: new Array(n).fill(true) };
+}
+
+function makeWall() {                        // dark brick wall, drawn once; the bulbs light it up
+  wall = document.createElement('canvas'); wall.width = W; wall.height = H;
+  const g = wall.getContext('2d');
+  g.fillStyle = '#1c1210'; g.fillRect(0, 0, W, H);
+  const bw = 64, bh = 26;
+  for (let y = 0, row = 0; y < H; y += bh, row++)
+    for (let x = (row % 2) * -bw / 2; x < W; x += bw) {
+      const v = 40 + Math.random() * 30;
+      g.fillStyle = `rgb(${v * 1.5 | 0},${v * .75 | 0},${v * .6 | 0})`;
+      g.fillRect(x + 2, y + 2, bw - 4, bh - 4);
+    }
+}
+
+function setup() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  makeWall();
+  strings = [];
+  const hooks = [0.04, 0.27, 0.5, 0.73, 0.96].map(f => f * W);
+  for (let i = 0; i < hooks.length - 1; i++) strings.push(makeString(hooks[i], H * .1, hooks[i + 1], H * .1, 1.18));
+  strings.push(makeString(W * .08, H * .34, W * .92, H * .4, 1.12));
+  strings.push(makeString(W * .2, H * .58, W * .62, H * .55, 1.3));
+  strings.push(makeString(W * .82, H * .5, W * .82, H * .9, 1, false));   // one loose end, hanging free
+}
+
+function brightness(k, p, t) {
+  switch (pattern) {
+    case 0: return 1;
+    case 1: return (k + Math.floor(t * 5)) % 3 === 0 ? 1 : 0.12;
+    case 2: { const s = Math.sin(t * p.sp + p.ph); return 0.15 + 0.85 * Math.max(0, s) ** 3; }
+    case 3: return 0.75 + 0.25 * Math.sin(k * 0.6 - t * 4);
+    case 4: return 0.2 + 0.8 * (0.5 + 0.5 * Math.sin(t * 1.4)) ** 2;
+  }
+}
+function color(k, t) {
+  return pattern === 3 ? `hsl(${(k * 24 - t * 90) % 360 + 360},100%,62%)` : PALETTE[k % PALETTE.length];
+}
+
+function physics() {
+  const mvx = mouse.x - mouse.px, mvy = mouse.y - mouse.py;
+  for (const s of strings) for (const p of s.pts) {
+    if (p.pin || p === grab) continue;
+    const vx = (p.x - p.px) * 0.992, vy = (p.y - p.py) * 0.992;
+    p.px = p.x; p.py = p.y; p.x += vx; p.y += vy + G;
+    if (!grab && !drawing) {                 // a quick swipe of the cursor knocks the wires
+      const d = Math.hypot(p.x - mouse.x, p.y - mouse.y);
+      if (d < 28) { p.x += mvx * 0.25; p.y += mvy * 0.25; }
+    }
+    if (p.y > H - 3) { p.y = H - 3; p.px = p.x - (p.x - p.px) * 0.5; }
+  }
+  for (let it = 0; it < ITER; it++)
+    for (const s of strings)
+      for (let i = 0; i < s.links.length; i++) {
+        if (!s.links[i]) continue;
+        const a = s.pts[i], b = s.pts[i + 1];
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1e-6, diff = (d - s.L) / d;
+        const fa = a.pin || a === grab, fb = b.pin || b === grab;
+        if (fa && fb) continue;
+        const wa = fa ? 0 : fb ? 1 : 0.5, wb = fb ? 0 : fa ? 1 : 0.5;
+        a.x += dx * diff * wa; a.y += dy * diff * wa;
+        b.x -= dx * diff * wb; b.y -= dy * diff * wb;
+      }
+  strings = strings.filter(s => s.pts.some(p => p.y < H + 50 && p.y > -500));
+  mouse.px = mouse.x; mouse.py = mouse.y;
+}
+
+function draw(t) {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(wall, 0, 0, W, H);
+  ctx.fillStyle = 'rgba(5,2,2,0.82)'; ctx.fillRect(0, 0, W, H);      // the room is dark…
+
+  const bulbs = [];
+  let k = 0;
+  for (const s of strings)
+    s.pts.forEach((p, i) => {
+      if (i % BULB_EVERY !== 1) return;
+      bulbs.push({ p, b: brightness(k, p, t), c: color(k, t), tilt: Math.max(-1, Math.min(1, (p.x - p.px) * 0.25)) });
+      k++;
+    });
+
+  // …except where the bulbs throw light onto the bricks
+  ctx.globalCompositeOperation = 'lighter';
+  for (const { p, b, c } of bulbs) {
+    const r = 80 + 50 * b, g = ctx.createRadialGradient(p.x, p.y + 8, 0, p.x, p.y + 8, r);
+    g.addColorStop(0, c); g.addColorStop(1, 'transparent');
+    ctx.globalAlpha = 0.3 * b; ctx.fillStyle = g;
+    ctx.fillRect(p.x - r, p.y + 8 - r, r * 2, r * 2);
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+
+  // wires
+  ctx.strokeStyle = '#0f2a12'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  for (const s of strings) {
+    ctx.beginPath();
+    for (let i = 0; i < s.links.length; i++) {
+      if (!s.links[i]) continue;
+      ctx.moveTo(s.pts[i].x, s.pts[i].y); ctx.lineTo(s.pts[i + 1].x, s.pts[i + 1].y);
+    }
+    ctx.stroke();
+    for (const p of s.pts) if (p.pin) {            // little brass hooks
+      ctx.fillStyle = '#b48a3c'; ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, 7); ctx.fill();
+    }
+  }
+
+  // bulbs: a socket and a glass drop, swinging with the wire
+  for (const { p, b, c, tilt } of bulbs) {
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(tilt);
+    ctx.fillStyle = '#1b3a1d'; ctx.fillRect(-2.5, 0, 5, 5);
+    ctx.globalAlpha = 0.35 + 0.65 * b; ctx.fillStyle = c;
+    ctx.beginPath(); ctx.ellipse(0, 11, 5, 8.5, 0, 0, 7); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = b; ctx.shadowColor = c; ctx.shadowBlur = 18 * b;
+    ctx.fillStyle = '#fff8'; ctx.beginPath(); ctx.ellipse(-1.3, 9, 2, 4.2, 0, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+
+  if (drawing) {                                   // preview the new string
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = '#f3c86a99'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(drawing.x, drawing.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+function nearest(x, y, maxD) {
+  let best = null, bd = maxD;
+  for (const s of strings) s.pts.forEach((p, i) => {
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d < bd) { bd = d; best = { s, p, i }; }
+  });
+  return best;
+}
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  mouse.x = mouse.px = e.clientX; mouse.y = mouse.py = e.clientY;
+  const n = nearest(e.clientX, e.clientY, 26);
+  if (n) { grab = n.p; cv.style.cursor = 'grabbing'; } else drawing = { x: e.clientX, y: e.clientY };
+});
+cv.addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  if (grab) { grab.px = grab.x; grab.py = grab.y; grab.x = e.clientX; grab.y = e.clientY; }
+});
+addEventListener('pointerup', () => {
+  if (drawing && Math.hypot(mouse.x - drawing.x, mouse.y - drawing.y) > 50)
+    strings.push(makeString(drawing.x, drawing.y, mouse.x, mouse.y, 1.15));
+  // let go: unpinned points keep the velocity of your throw, hooks stay where you put them
+  grab = null; drawing = null; cv.style.cursor = 'grab';
+});
+cv.addEventListener('dblclick', e => {
+  const n = nearest(e.clientX, e.clientY, 26);
+  if (!n) return;
+  if (n.p.pin) { n.p.pin = false; return; }
+  const i = Math.min(n.i, n.s.links.length - 1);
+  n.s.links[i] = false;
+});
+
+const bar = document.getElementById('bar');
+PATTERNS.forEach((name, i) => {
+  const b = document.createElement('button'); b.textContent = `${i + 1} ${name}`;
+  b.onclick = () => setPattern(i); bar.appendChild(b);
+});
+const reset = document.createElement('button'); reset.textContent = 'Re-hang'; reset.onclick = setup; bar.appendChild(reset);
+function setPattern(i) { pattern = i; [...bar.children].forEach((b, j) => b.classList.toggle('on', j === i)); }
+addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= 5) setPattern(n - 1); });
+setTimeout(() => document.getElementById('hint').style.opacity = 0, 10000);
+addEventListener('resize', setup);
+
+setup(); setPattern(2);
+(function loop(ms) { physics(); draw(ms / 1000); requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>

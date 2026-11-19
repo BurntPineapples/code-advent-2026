@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 4 · Hearth</title>
+<style>
+  html,body { margin:0; height:100%; background:#060302; overflow:hidden; font-family:system-ui,sans-serif; color:#f0d9b5; }
+  canvas { display:block; width:100vw; height:100vh; cursor:pointer; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  #snd { position:fixed; top:12px; right:12px; z-index:2; background:#0008; color:#f0d9b5; border:1px solid #ffffff22; border-radius:8px; padding:6px 10px; font:inherit; font-size:14px; cursor:pointer; }
+  .hint { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); font-size:13px; color:#f0d9b599; text-align:center; width:max-content; max-width:92vw; transition:opacity 1s; pointer-events:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<button id="snd">Sound: off</button>
+<canvas id="c"></canvas>
+<div class="hint" id="hint">Click to throw another log on · sweep the mouse sideways to make a draught · sound is on the top right</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const RAMP = ' .,:;i1tfLCG08@';     // heat → glyph, from sparse to dense
+const MAXH = 36;
+// heat → colour: black → deep red → orange → yellow → white
+const PAL = Array.from({ length: MAXH + 1 }, (_, h) => {
+  const t = h / MAXH;
+  const r = Math.min(255, t * 3.2 * 255), g = Math.max(0, Math.min(255, (t - 0.3) * 2.2 * 255)), b = Math.max(0, Math.min(255, (t - 0.75) * 4 * 255));
+  return `rgb(${r | 0},${g | 0},${b | 0})`;
+});
+
+let W, H, DPR, fs, cw, chh, cols, rows, fx0, fx1, fy0, fy1, ix0, iy0, fw, fh;
+const glowCv = document.createElement('canvas'); let glowImg;
+let staticCells = [], fire, sparks = [], fuel = 0.95, wind = 0, glow = 0, logs = [];
+
+function layout() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  fs = Math.max(9, Math.min(22, Math.floor(Math.min(W / 66, H / 36))));
+  ctx.font = `${fs}px ui-monospace, Consolas, Menlo, monospace`;
+  cw = ctx.measureText('M').width; chh = Math.ceil(fs * 1.12);
+  cols = Math.floor(W / cw); rows = Math.floor(H / chh);
+
+  // fireplace box (in character cells)
+  const fwTotal = Math.max(36, Math.min(cols - 6, Math.round(cols * 0.56)));
+  fx0 = Math.floor((cols - fwTotal) / 2); fx1 = fx0 + fwTotal;
+  fy1 = rows - 4; fy0 = Math.max(6, Math.round(rows * 0.3));
+  ix0 = fx0 + 4; iy0 = fy0 + 2; fw = fx1 - 4 - ix0; fh = fy1 - iy0;
+  fire = new Uint8Array(fw * fh);
+  glowCv.width = fw; glowCv.height = fh; glowImg = glowCv.getContext('2d').createImageData(fw, fh);
+
+  staticCells = [];
+  const cx = (fx0 + fx1) / 2, cy = (iy0 + fy1) / 2;
+  const put = (x, y, ch, rgb) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) return;
+    const d2 = ((x - cx) / cols * 1.4) ** 2 + ((y - cy) / rows) ** 2;
+    staticCells.push({ x, y, ch, rgb, fall: 1 / (1 + d2 * 14) });
+  };
+  // wallpaper: a faint diamond pattern that the fire lights up
+  for (let y = 0; y < fy1 + 1; y++) for (let x = 0; x < cols; x++) {
+    if (x >= fx0 - 1 && x < fx1 + 1 && y >= fy0 - 1) continue;
+    const a = (x + y * 2) % 8, b = (x - y * 2 + 800) % 8;
+    if (a === 0 || b === 0) put(x, y, (a === 0 && b === 0) ? '+' : (a === 0 ? '/' : '\\'), [160, 95, 75]);
+  }
+  // brick surround
+  for (let y = fy0; y < fy1; y++) for (let x = fx0; x < fx1; x++) {
+    if (x >= ix0 && x < ix0 + fw && y >= iy0) continue;
+    put(x, y, (x + (y % 2) * 3) % 6 === 0 ? '|' : '_', [170, 70, 50]);
+  }
+  // mantel shelf, hearth stone, floor
+  for (let x = fx0 - 3; x < fx1 + 3; x++) { put(x, fy0 - 1, '=', [150, 100, 60]); put(x, fy1, '#', [110, 100, 95]); }
+  for (let x = 0; x < cols; x++) for (let y = fy1 + 1; y < rows; y++) put(x, y, (x + y) % 3 ? '-' : '~', [90, 55, 35]);
+  // stockings hanging from the mantel
+  const STOCK = ['.==.', '|  |', '|  |', '|  \\_', '\\___)'];
+  [0.2, 0.5, 0.8].forEach((f, k) => {
+    const sx = Math.round(fx0 + (fx1 - fx0) * f) - 2, rgb = [[230, 40, 40], [40, 190, 80], [240, 240, 240]][k];
+    STOCK.forEach((line, dy) => [...line].forEach((ch, dx) => { if (ch !== ' ') put(sx + dx, fy0 + dy, ch, dy === 0 ? [250, 250, 250] : rgb); }));
+  });
+  // candles on the mantel
+  for (const x of [fx0 - 1, fx1]) { put(x, fy0 - 2, '|', [240, 230, 210]); put(x, fy0 - 3, '|', [240, 230, 210]); }
+  // logs: two rows of firewood at the bottom of the firebox
+  logs = [];
+  const logRow = (y, a, b) => { for (let x = a; x < b; x++) logs.push({ x, y, ch: x === a ? '(' : x === b - 1 ? ')' : (x % 5 ? '=' : 'o') }); };
+  logRow(fh - 2, Math.round(fw * 0.12), Math.round(fw * 0.62));
+  logRow(fh - 1, Math.round(fw * 0.35), Math.round(fw * 0.9));
+  logRow(fh - 1, Math.round(fw * 0.06), Math.round(fw * 0.33));
+}
+
+function simulate() {
+  // feed the bottom row; the logs give off heat roughly where they lie
+  const base = Math.min(MAXH, fuel * MAXH * 1.1), t = performance.now() / 1000;
+  for (let x = 0; x < fw; x++) {
+    const u = (x / fw - 0.48) / 0.42, bell = Math.max(0, 1 - u * u);          // hottest in the middle of the logs
+    const n = 0.5 + 0.3 * Math.sin(x * 0.23 + t * 1.7) + 0.2 * Math.sin(x * 0.09 - t * 0.8);  // drifting hot spots
+    const h = base * Math.sqrt(bell) * (0.45 + 0.55 * n) - Math.random() * (fuel < 0.25 ? 20 : 6);
+    fire[(fh - 1) * fw + x] = Math.max(0, h) | 0;
+  }
+  // classic "doom fire" spread: every cell copies the one below it, a bit cooler and jittered sideways
+  const decayRange = 2 * MAXH / (0.8 * fh);
+  for (let y = 1; y < fh; y++) for (let x = 0; x < fw; x++) {
+    const src = y * fw + x, h = fire[src];
+    let dx = (Math.random() * 3 | 0) - 1;
+    if (Math.random() < Math.abs(wind)) dx += Math.sign(wind);
+    const tx = Math.min(fw - 1, Math.max(0, x + dx));
+    fire[(y - 1) * fw + tx] = Math.max(0, h - (Math.random() * decayRange | 0));
+  }
+  fuel = Math.max(0.05, fuel - 1 / (60 * 75));      // a log lasts about a minute and a bit
+  wind *= 0.96;
+  // sparks drift up from the flames
+  if (Math.random() < fuel * 0.5) sparks.push({ x: fw * (0.15 + Math.random() * 0.7), y: fh * (0.6 + Math.random() * 0.3), vx: (Math.random() - 0.5) * 0.3, vy: -0.25 - Math.random() * 0.35, life: 1 });
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i]; s.x += s.vx + wind * 0.6 + Math.sin(s.y * 0.7) * 0.1; s.y += s.vy; s.life -= 0.012;
+    if (s.life <= 0 || s.y < 0 || s.x < 0 || s.x >= fw) sparks.splice(i, 1);
+  }
+  let sum = 0; for (let i = 0; i < fire.length; i++) sum += fire[i];
+  glow += (sum / fire.length / MAXH * 5 - glow) * 0.25;  // room brightness follows the flames
+}
+
+function draw(t) {
+  ctx.fillStyle = '#060302'; ctx.fillRect(0, 0, W, H);
+  ctx.textBaseline = 'top';
+  const flick = glow * (0.85 + 0.15 * Math.sin(t / 70) * Math.sin(t / 133));
+  let last = '';
+  for (const c of staticCells) {
+    const L = 0.16 + Math.min(1.3, flick * c.fall * 1.6);
+    const col = `rgb(${Math.min(255, c.rgb[0] * L) | 0},${Math.min(255, c.rgb[1] * L * 0.92) | 0},${Math.min(255, c.rgb[2] * L * 0.8) | 0})`;
+    if (col !== last) { ctx.fillStyle = col; last = col; }
+    ctx.fillText(c.ch, c.x * cw, c.y * chh);
+  }
+  // candle flames
+  ctx.fillStyle = '#ffcf5a';
+  for (const x of [fx0 - 1, fx1]) ctx.fillText(Math.sin(t / 90 + x) > 0 ? '^' : '\'', x * cw, (fy0 - 4) * chh);
+  // a blurred copy of the heat map behind the glyphs gives the fire its glow
+  const gd = glowImg.data;
+  for (let i = 0; i < fire.length; i++) {
+    const t = fire[i] / MAXH;
+    gd[i * 4] = 255; gd[i * 4 + 1] = 60 + 160 * t; gd[i * 4 + 2] = 20; gd[i * 4 + 3] = 255 * Math.min(1, t * 1.6);
+  }
+  glowCv.getContext('2d').putImageData(glowImg, 0, 0);
+  ctx.save(); ctx.globalAlpha = 0.55; ctx.filter = `blur(${cw * 1.5}px)`;
+  ctx.drawImage(glowCv, ix0 * cw, iy0 * chh, fw * cw, fh * chh);
+  ctx.restore();
+  // the fire itself
+  ctx.font = `bold ${fs}px ui-monospace, Consolas, Menlo, monospace`;
+  for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) {
+    const h = fire[y * fw + x];
+    if (h < 2) continue;
+    ctx.fillStyle = PAL[h];
+    ctx.fillText(RAMP[Math.min(RAMP.length - 1, (Math.sqrt(h / MAXH) * RAMP.length) | 0)], (ix0 + x) * cw, (iy0 + y) * chh);
+  }
+  ctx.font = `${fs}px ui-monospace, Consolas, Menlo, monospace`;
+  // logs sit in front of the flames, charred with glowing edges
+  for (const l of logs) {
+    const hot = fire[Math.max(0, l.y - 1) * fw + l.x] / MAXH;
+    ctx.fillStyle = `rgb(${90 + hot * 160 | 0},${45 + hot * 60 | 0},${25})`;
+    ctx.fillText(l.ch, (ix0 + l.x) * cw, (iy0 + l.y) * chh);
+  }
+  for (const s of sparks) {
+    ctx.fillStyle = `rgba(255,${150 + s.life * 100 | 0},60,${s.life})`;
+    ctx.fillText(s.life > 0.6 ? '*' : '.', (ix0 + s.x) * cw, (iy0 + s.y) * chh);
+  }
+}
+
+// ---- sound: everything is synthesised from noise, nothing is recorded ----
+let ac = null, rumbleGain, noiseBuf, soundOn = false;
+function initAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); let last = 0;
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const brown = ac.createBuffer(1, ac.sampleRate * 4, ac.sampleRate), b = brown.getChannelData(0);
+  for (let i = 0; i < b.length; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; b[i] = last * 3.5; }
+  const src = ac.createBufferSource(); src.buffer = brown; src.loop = true;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 400;
+  rumbleGain = ac.createGain(); rumbleGain.gain.value = 0;
+  src.connect(lp).connect(rumbleGain).connect(ac.destination); src.start();
+}
+function crackle(vol = 1, low = false) {
+  if (!soundOn) return;
+  const t = ac.currentTime, s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = low ? 300 : 1200 + Math.random() * 4000; f.Q.value = 0.8;
+  const g = ac.createGain(), len = low ? 0.25 : 0.01 + Math.random() * 0.05;
+  g.gain.setValueAtTime(vol * (0.15 + Math.random() * 0.4), t); g.gain.exponentialRampToValueAtTime(0.001, t + len);
+  s.connect(f).connect(g).connect(ac.destination); s.start(t, Math.random() * 1.5, len + 0.02);
+}
+document.getElementById('snd').onclick = () => {
+  if (!ac) initAudio();
+  soundOn = !soundOn; ac.resume();
+  document.getElementById('snd').textContent = soundOn ? 'Sound: on' : 'Sound: off';
+};
+
+cv.addEventListener('pointerdown', () => {
+  fuel = Math.min(1.15, fuel + 0.55);
+  for (let i = 0; i < 40; i++) sparks.push({ x: fw * (0.2 + Math.random() * 0.6), y: fh * 0.85, vx: (Math.random() - 0.5) * 1.2, vy: -0.4 - Math.random() * 0.8, life: 1 });
+  crackle(2.5, true); for (let i = 0; i < 6; i++) setTimeout(() => crackle(1.5), i * 40 + Math.random() * 120);
+});
+let lastX = null;
+cv.addEventListener('pointermove', e => { if (lastX !== null) wind = Math.max(-0.9, Math.min(0.9, wind + (e.clientX - lastX) * 0.004)); lastX = e.clientX; });
+addEventListener('resize', layout);
+setTimeout(() => document.getElementById('hint').style.opacity = 0, 10000);
+
+layout();
+for (let i = 0; i < 80; i++) simulate();     // start with a fire already going
+(function loop(t) {
+  simulate(); draw(t);
+  if (soundOn) { rumbleGain.gain.value = 0.12 * fuel; if (Math.random() < fuel * 0.35) crackle(fuel); }
+  requestAnimationFrame(loop);
+})(0);
+</script>
+</body>
+</html>

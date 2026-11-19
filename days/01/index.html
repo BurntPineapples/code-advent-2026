@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 1 · First Snow</title>
+<style>
+  html,body { margin:0; height:100%; background:#050816; overflow:hidden; font-family:system-ui,sans-serif; color:#cfe0ff; }
+  canvas { display:block; width:100vw; height:100vh; cursor:crosshair; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0007; padding:6px 10px; border-radius:8px; }
+  .hint { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); font-size:13px; color:#cfe0ff99; text-align:center; width:max-content; max-width:92vw; transition:opacity 1s; pointer-events:none; }
+  form { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:6px; }
+  input { width:min(200px,40vw); background:#0008; border:1px solid #ffffff2a; color:#fff; border-radius:8px; padding:6px 10px; font:inherit; font-size:14px; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<form id="f"><input id="msg" maxlength="40" placeholder="Hide your own message…" aria-label="Your hidden message"></form>
+<canvas id="c"></canvas>
+<div class="hint" id="hint">Something is hiding in the snow. Wait for it…<br>Drag to brush the snow away · Space or double-click to shake it all off</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const CELL = 4;                         // size of one snow "grain" in CSS pixels
+const off = document.createElement('canvas'), octx = off.getContext('2d');
+let W, H, DPR, cols, rows, mask, fill, ground, img, flakes, loose, sparkles, groundMax;
+let message = new URLSearchParams(location.search).get('msg') || 'MERRY CHRISTMAS';
+let wind = 0, mouse = { x:-1e9, y:-1e9, down:false, vx:0 };
+
+// Draw the message invisibly into a tiny canvas; every opaque pixel becomes a "sticky" cell.
+function buildMask() {
+  const m = document.createElement('canvas'); m.width = cols; m.height = rows;
+  const g = m.getContext('2d');
+  const words = message.toUpperCase().split(/\s+/).filter(Boolean);
+  let best = null;
+  for (let n = 1; n <= Math.min(words.length, 4); n++) {         // try 1..4 lines, keep the biggest font
+    const per = Math.ceil(words.length / n), lines = [];
+    for (let i = 0; i < words.length; i += per) lines.push(words.slice(i, i + per).join(' '));
+    g.font = '900 100px system-ui, Arial Black, sans-serif';
+    const wMax = Math.max(...lines.map(l => g.measureText(l).width));
+    const size = Math.min(100 * cols * 0.9 / wMax, rows * 0.62 / lines.length / 1.05);
+    if (!best || size > best.size) best = { size, lines };
+  }
+  g.font = `900 ${best.size}px system-ui, Arial Black, sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#fff';
+  const lh = best.size * 1.05, top = rows * 0.42 - lh * (best.lines.length - 1) / 2;
+  best.lines.forEach((l, i) => g.fillText(l, cols / 2, top + i * lh));
+  const d = g.getImageData(0, 0, cols, rows).data;
+  mask = new Uint8Array(cols * rows);
+  for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3] > 120;
+  fill = new Uint8Array(cols * rows);           // 0 = empty, otherwise brightness of the stuck grain
+}
+
+function reset() {
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  cols = Math.ceil(W / CELL); rows = Math.ceil(H / CELL);
+  off.width = cols; off.height = rows; img = octx.createImageData(cols, rows);
+  ground = new Float32Array(cols); groundMax = rows * 0.1;
+  buildMask();
+  const n = Math.min(4000, Math.round(cols * rows / 50));
+  flakes = Array.from({ length: n }, () => newFlake(true));
+  loose = []; sparkles = [];
+}
+
+function newFlake(anywhere) {
+  const z = Math.random();                       // depth: near flakes are bigger and faster
+  return { x: Math.random() * cols, y: anywhere ? Math.random() * rows : -2, z,
+           vy: 0.35 + z * 0.9, ph: Math.random() * 7, r: 0.6 + z * 2.2 };
+}
+
+function deposit(c) {                            // add snow to the ground pile and let it slump
+  c = Math.max(0, Math.min(cols - 1, c | 0));
+  if (ground[c] < groundMax) ground[c] += 0.3;
+  for (let k = 0; k < 3; k++) {
+    const l = c - 1, r = c + 1;
+    if (l >= 0 && ground[c] - ground[l] > 1.5) { ground[c] -= .5; ground[l] += .5; c = l; }
+    else if (r < cols && ground[c] - ground[r] > 1.5) { ground[c] -= .5; ground[r] += .5; c = r; }
+  }
+}
+
+function stick(i) {
+  fill[i] = 190 + Math.random() * 65 | 0;
+  if (Math.random() < .04) sparkles.push({ x: i % cols, y: i / cols | 0, life: 1 });
+  for (const j of [i - 1, i + 1, i - cols, i + cols])   // grains clump: neighbours often stick too
+    if (j >= 0 && j < fill.length && mask[j] && !fill[j] && Math.random() < .45) fill[j] = 170 + Math.random() * 80 | 0;
+}
+
+function knockLoose(i) {
+  if (!fill[i]) return;
+  fill[i] = 0;
+  if (loose.length < 30000) loose.push({ x: i % cols + Math.random(), y: i / cols | 0, vx: (Math.random() - .5) * .8, vy: -Math.random() * .6 });
+}
+
+function shake() { for (let i = 0; i < fill.length; i++) knockLoose(i); }
+
+function step(t) {
+  wind += (mouse.vx * 0.02 - wind) * 0.02;
+  const p = 0.016;                               // chance per cell travelled that a flake sticks inside a letter
+  for (const f of flakes) {
+    f.y += f.vy;
+    f.x += wind * (0.5 + f.z) + Math.sin(t / 900 + f.ph) * 0.15;
+    const dx = f.x - mouse.x, dy = f.y - mouse.y, d2 = dx * dx + dy * dy;
+    if (d2 < 200) { f.x += dx / Math.sqrt(d2 + 1) * 0.9; }     // flakes swerve around the cursor
+    if (f.x < 0) f.x += cols; if (f.x >= cols) f.x -= cols;
+    const cx = f.x | 0, cy = f.y | 0;
+    if (cy >= 0 && cy < rows) {
+      const i = cy * cols + cx;
+      if (mask[i] && !fill[i] && Math.random() < p * f.vy * 1.6) { stick(i); Object.assign(f, newFlake(false)); continue; }
+    }
+    if (f.y >= rows - ground[cx]) { deposit(cx); Object.assign(f, newFlake(false)); }
+  }
+  for (let k = loose.length - 1; k >= 0; k--) {
+    const g = loose[k];
+    g.vy += 0.05; g.vx *= 0.99; g.x += g.vx + wind * .5; g.y += g.vy;
+    if (g.x < 0 || g.x >= cols) { loose.splice(k, 1); continue; }
+    if (g.y >= rows - ground[g.x | 0]) { deposit(g.x); loose[k] = loose[loose.length - 1]; loose.pop(); }
+  }
+  for (let i = 0; i < cols; i++) ground[i] = Math.max(0, ground[i] - 0.0015);   // slow melt
+  if (mouse.down) {                              // brushing knocks grains loose
+    const R = 7, mx = mouse.x | 0, my = mouse.y | 0;
+    for (let y = my - R; y <= my + R; y++) for (let x = mx - R; x <= mx + R; x++)
+      if (x >= 0 && y >= 0 && x < cols && y < rows && (x - mx) ** 2 + (y - my) ** 2 < R * R) knockLoose(y * cols + x);
+  }
+}
+
+function draw(t) {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#02040c'); sky.addColorStop(1, '#0d1a3a');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  // stuck snow layer: one pixel per grain, scaled up with smoothing for a soft frosted look
+  const d = img.data;
+  for (let i = 0, j = 0; i < fill.length; i++, j += 4) {
+    const v = fill[i];
+    d[j] = v * 0.92; d[j + 1] = v * 0.96; d[j + 2] = v; d[j + 3] = v ? 255 : 0;
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.save(); ctx.imageSmoothingEnabled = true;
+  ctx.shadowColor = '#9cc4ff'; ctx.shadowBlur = 14;
+  ctx.drawImage(off, 0, 0, cols * CELL, rows * CELL);
+  ctx.restore();
+
+  // sparkles on freshly stuck grains
+  ctx.fillStyle = '#fff';
+  for (let k = sparkles.length - 1; k >= 0; k--) {
+    const s = sparkles[k]; s.life -= 0.02;
+    if (s.life <= 0) { sparkles.splice(k, 1); continue; }
+    const r = s.life * 5, X = s.x * CELL + 2, Y = s.y * CELL + 2;
+    ctx.globalAlpha = s.life;
+    ctx.fillRect(X - r, Y - .5, r * 2, 1); ctx.fillRect(X - .5, Y - r, 1, r * 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // ground pile
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let c = 0; c < cols; c++) ctx.lineTo(c * CELL, H - ground[c] * CELL);
+  ctx.lineTo(W, H); ctx.closePath();
+  const gg = ctx.createLinearGradient(0, H - groundMax * CELL, 0, H);
+  gg.addColorStop(0, '#f4f8ff'); gg.addColorStop(1, '#9db4e0');
+  ctx.fillStyle = gg; ctx.fill();
+
+  // falling flakes and loose grains
+  ctx.fillStyle = '#fff';
+  for (const f of flakes) {
+    ctx.globalAlpha = 0.35 + f.z * 0.6;
+    ctx.beginPath(); ctx.arc(f.x * CELL, f.y * CELL, f.r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = .9;
+  for (const g of loose) ctx.fillRect(g.x * CELL, g.y * CELL, CELL * .8, CELL * .8);
+  ctx.globalAlpha = 1;
+}
+
+function frame(t) { step(t); draw(t); requestAnimationFrame(frame); }
+
+// input
+function toCell(e) { return { x: e.clientX / CELL, y: e.clientY / CELL }; }
+let lastX = 0;
+cv.addEventListener('pointermove', e => { const p = toCell(e); mouse.vx = (e.clientX - lastX); lastX = e.clientX; mouse.x = p.x; mouse.y = p.y; });
+cv.addEventListener('pointerdown', e => { mouse.down = true; cv.setPointerCapture(e.pointerId); const p = toCell(e); mouse.x = p.x; mouse.y = p.y; lastX = e.clientX; });
+addEventListener('pointerup', () => { mouse.down = false; mouse.vx = 0; });
+cv.addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e9; mouse.vx = 0; });
+cv.addEventListener('dblclick', shake);
+addEventListener('keydown', e => { if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); shake(); } });
+document.getElementById('f').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = document.getElementById('msg').value.trim();
+  if (!v) return;
+  message = v; shake(); buildMask();
+  history.replaceState(null, '', '?msg=' + encodeURIComponent(v));   // shareable link
+  document.getElementById('msg').blur();
+});
+setTimeout(() => document.getElementById('hint').style.opacity = 0, 12000);
+addEventListener('resize', reset);
+reset(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

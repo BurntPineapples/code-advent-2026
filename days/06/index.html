@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 6 · The Music Box</title>
+<style>
+  html,body { margin:0; height:100%; background:#1a0f08; overflow:hidden; font-family:system-ui,sans-serif; color:#f5e6c8; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; max-width:calc(100vw - 130px); }
+  .bar > * { background:#0009; color:#f5e6c8; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; }
+  .bar button { cursor:pointer; }
+  .bar label { display:flex; align-items:center; gap:6px; }
+  .bar input[type=range] { width:90px; }
+  .hint { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); font-size:13px; color:#f5e6c899; text-align:center; width:max-content; max-width:92vw; transition:opacity 1s; pointer-events:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="bar">
+  <select id="song" aria-label="Song"></select>
+  <button id="play">▶ Play</button>
+  <label>Speed <input id="tempo" type="range" min="60" max="200" value="110"></label>
+  <button id="clear">Blank strip</button>
+  <button id="share">Copy link</button>
+</div>
+<canvas id="c"></canvas>
+<div class="hint" id="hint">Click the paper to punch or patch holes · drag the crank round to play it by hand · or press Play</div>
+<script>
+// 15 tines tuned to a C-major scale from G3 to G5, like a real music-box comb.
+const NAMES = ['G3', 'A3', 'B3', 'C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5'];
+const SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const freq = n => 440 * 2 ** ((SEMI[n[0]] + 12 * (+n[1] + 1) - 69) / 12);
+const ROWS = NAMES.length, STEPS_PER_BEAT = 2;
+
+// Traditional, public-domain melodies, written as "note:beats".
+const SONGS = {
+  'Jingle Bells': 'E4:1 E4:1 E4:2 E4:1 E4:1 E4:2 E4:1 G4:1 C4:1.5 D4:.5 E4:4 F4:1 F4:1 F4:1.5 F4:.5 F4:1 E4:1 E4:1 E4:.5 E4:.5 E4:1 D4:1 D4:1 E4:1 D4:2 G4:2 ' +
+                  'E4:1 E4:1 E4:2 E4:1 E4:1 E4:2 E4:1 G4:1 C4:1.5 D4:.5 E4:4 F4:1 F4:1 F4:1.5 F4:.5 F4:1 E4:1 E4:1 E4:.5 E4:.5 G4:1 G4:1 F4:1 D4:1 C4:4 -:2',
+  'Deck the Halls': 'G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 D4:.5 E4:.5 F4:.5 D4:.5 E4:1.5 D4:.5 C4:1 B3:1 C4:2 ' +
+                    'G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 D4:.5 E4:.5 F4:.5 D4:.5 E4:1.5 D4:.5 C4:1 B3:1 C4:2 ' +
+                    'D4:1.5 E4:.5 F4:1 D4:1 E4:1.5 F4:.5 G4:1 D4:1 E4:.5 F4:.5 G4:1 A4:.5 B4:.5 C5:1 B4:1 A4:1 G4:2 ' +
+                    'G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 A4:.5 A4:.5 A4:.5 A4:.5 G4:1.5 F4:.5 E4:1 D4:1 C4:2 -:2',
+  'We Wish You a Merry Christmas': 'G4:1 C5:1 C5:.5 D5:.5 C5:.5 B4:.5 A4:1 A4:1 A4:1 D5:1 D5:.5 E5:.5 D5:.5 C5:.5 B4:1 G4:1 G4:1 ' +
+                    'E5:1 E5:.5 F5:.5 E5:.5 D5:.5 C5:1 A4:1 G4:.5 G4:.5 A4:1 D5:1 B4:1 C5:2 -:2',
+  'Silent Night': 'G4:1.5 A4:.5 G4:1 E4:3 G4:1.5 A4:.5 G4:1 E4:3 D5:2 D5:1 B4:3 C5:2 C5:1 G4:3 ' +
+                  'A4:2 A4:1 C5:1.5 B4:.5 A4:1 G4:1.5 A4:.5 G4:1 E4:3 A4:2 A4:1 C5:1.5 B4:.5 A4:1 G4:1.5 A4:.5 G4:1 E4:3 ' +
+                  'D5:2 D5:1 F5:1.5 D5:.5 B4:1 C5:3 E5:3 C5:1.5 G4:.5 E4:1 G4:1.5 F4:.5 D4:1 C4:6 -:2',
+};
+
+function parse(src) {
+  const cols = [];
+  for (const tok of src.trim().split(/\s+/)) {
+    const [n, b] = tok.split(':'), len = Math.round(+b * STEPS_PER_BEAT), col = new Array(ROWS).fill(false);
+    if (n !== '-') col[NAMES.indexOf(n)] = true;
+    cols.push(col);
+    for (let i = 1; i < len; i++) cols.push(new Array(ROWS).fill(false));
+  }
+  return cols;
+}
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR, cellW, cellH, topY, combX, crank, strip = [], pos = 0, playing = false, lastStep = -1;
+const amp = new Float32Array(ROWS), phase = new Float32Array(ROWS);
+
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  cellH = Math.max(14, Math.min(28, (H * 0.58) / ROWS)); cellW = cellH * 1.15;
+  topY = (H - cellH * ROWS) / 2 + 10; combX = Math.max(150, W * 0.24);
+  crank = { x: Math.min(W - 70, combX - 70), y: topY + cellH * ROWS + 70, r: 40, a: 0 };
+  if (crank.y + 50 > H) crank = { x: 70, y: H - 60, r: 34, a: crank.a };
+}
+
+// ---- sound: a plucked steel tine is a sine with a fast attack, a long ring and a short metallic overtone ----
+let ac, master, verb;
+function audio() {
+  if (ac) return ac.resume();
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  master = ac.createGain(); master.gain.value = 0.5;
+  verb = ac.createConvolver();                    // homemade reverb: decaying noise as the impulse response
+  const len = ac.sampleRate * 1.8, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3; }
+  verb.buffer = ir;
+  const wet = ac.createGain(); wet.gain.value = 0.25;
+  master.connect(ac.destination); master.connect(verb).connect(wet).connect(ac.destination);
+}
+function pluck(row) {
+  amp[row] = 1;
+  if (!ac) return;
+  const f = freq(NAMES[row]), t = ac.currentTime, ring = 2.6 - row * 0.1;
+  for (const [mult, vol, dec] of [[1, 0.32, ring], [2, 0.06, ring * 0.4], [5.93, 0.05, 0.18]]) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = f * mult; o.type = 'sine';
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t + dec);
+    o.connect(g).connect(master); o.start(t); o.stop(t + dec + 0.05);
+  }
+}
+
+function advance(steps) {
+  const L = strip.length, start = pos;
+  pos += steps;
+  if (steps > 0)                                    // every column whose holes crossed the comb gets plucked
+    for (let s = Math.floor(start) + 1, n = 0; s <= Math.floor(pos) && n < 8; s++, n++)
+      strip[((s % L) + L) % L].forEach((on, r) => on && pluck(r));
+  pos = ((pos % L) + L) % L;
+}
+
+function draw(now) {
+  ctx.fillStyle = '#1a0f08'; ctx.fillRect(0, 0, W, H);
+  // wooden case
+  const wood = ctx.createLinearGradient(0, topY - 60, 0, topY + cellH * ROWS + 60);
+  wood.addColorStop(0, '#4a2a14'); wood.addColorStop(0.5, '#6b3d1c'); wood.addColorStop(1, '#3a200f');
+  ctx.fillStyle = wood; ctx.fillRect(0, topY - 40, W, cellH * ROWS + 80);
+  ctx.strokeStyle = '#ffffff10'; ctx.lineWidth = 1;
+  for (let i = 0; i < 18; i++) { ctx.beginPath(); const y = topY - 40 + i * (cellH * ROWS + 80) / 18; ctx.moveTo(0, y); ctx.bezierCurveTo(W / 3, y + 6, W * 2 / 3, y - 6, W, y + 2); ctx.stroke(); }
+
+  // the paper strip
+  const L = strip.length, py = topY - 12, ph = cellH * ROWS + 24;
+  ctx.fillStyle = '#efe3c4'; ctx.fillRect(0, py, W, ph);
+  const first = Math.floor(pos - combX / cellW) - 1, last = Math.ceil(pos + (W - combX) / cellW) + 1;
+  for (let s = first; s <= last; s++) {
+    const x = combX + (s - pos - 0.5) * cellW, col = strip[((s % L) + L) % L];
+    const idx = ((s % L) + L) % L;
+    ctx.fillStyle = idx % (STEPS_PER_BEAT * 4) === 0 ? '#c9b48a' : idx % STEPS_PER_BEAT === 0 ? '#ddcca6' : '#e8dcbc';
+    ctx.fillRect(x, py, 1, ph);
+    ctx.fillStyle = '#5c4630'; ctx.beginPath(); ctx.arc(x + cellW / 2, py + 6, 2.2, 0, 7); ctx.arc(x + cellW / 2, py + ph - 6, 2.2, 0, 7); ctx.fill();
+    if (idx === 0) { ctx.fillStyle = '#b5523b'; ctx.fillRect(x - 1, py, 3, ph); }   // start of the loop
+    for (let r = 0; r < ROWS; r++) if (col[r]) {
+      const y = topY + (ROWS - 1 - r) * cellH + cellH / 2, past = x + cellW / 2 < combX;
+      ctx.fillStyle = past ? '#2b1d12' : '#120b06';
+      ctx.beginPath(); ctx.ellipse(x + cellW / 2, y, cellW * 0.32, cellH * 0.3, 0, 0, 7); ctx.fill();
+    }
+  }
+  for (let r = 0; r < ROWS; r++) { ctx.fillStyle = '#00000012'; ctx.fillRect(0, topY + r * cellH, W, 1); }
+
+  // brass comb: a block on the left with one tine per note, ringing when plucked
+  ctx.fillStyle = '#7a5a20'; ctx.fillRect(0, topY - 18, combX - 70, cellH * ROWS + 36);
+  const brass = ctx.createLinearGradient(0, 0, combX, 0); brass.addColorStop(0, '#9c7a32'); brass.addColorStop(1, '#e8cd7a');
+  for (let r = 0; r < ROWS; r++) {
+    const y = topY + (ROWS - 1 - r) * cellH + cellH / 2;
+    phase[r] += 0.9 + r * 0.05; amp[r] *= 0.94;
+    const wob = Math.sin(phase[r]) * amp[r] * cellH * 0.18;
+    ctx.strokeStyle = brass; ctx.lineWidth = Math.max(3, cellH * 0.45); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(combX - 75, y); ctx.quadraticCurveTo(combX - 30, y + wob * 0.4, combX - 4, y + wob); ctx.stroke();
+    if (amp[r] > 0.05) { ctx.fillStyle = `rgba(255,236,170,${amp[r] * 0.6})`; ctx.beginPath(); ctx.arc(combX - 4, y + wob, cellH * 0.45, 0, 7); ctx.fill(); }
+    ctx.fillStyle = '#f5e6c8aa'; ctx.font = `${Math.max(9, cellH * 0.45)}px system-ui`; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(NAMES[r], combX - 82, y);
+  }
+  ctx.fillStyle = '#e8cd7a55'; ctx.fillRect(combX - 1, py, 2, ph);
+
+  // crank
+  const { x, y, r, a } = crank;
+  ctx.fillStyle = '#2a1a0e'; ctx.beginPath(); ctx.arc(x, y, r + 8, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#d8b864'; ctx.lineWidth = 7; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); ctx.stroke();
+  ctx.fillStyle = '#d8b864'; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill();
+  ctx.fillStyle = '#7a2d1c'; ctx.beginPath(); ctx.arc(x + Math.cos(a) * r, y + Math.sin(a) * r, 10, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f5e6c8aa'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillText('crank me', x, y + r + 22);
+}
+
+let lastT = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000 || 0); lastT = now;
+  if (playing) { const steps = +document.getElementById('tempo').value / 60 * STEPS_PER_BEAT * dt; advance(steps); crank.a += steps * 0.9; }
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+// ---- input ----
+let dragCrank = null;
+cv.addEventListener('pointerdown', e => {
+  audio();
+  const mx = e.clientX, my = e.clientY;
+  if (Math.hypot(mx - crank.x, my - crank.y) < crank.r + 18) { dragCrank = Math.atan2(my - crank.y, mx - crank.x); cv.setPointerCapture(e.pointerId); return; }
+  if (my > topY && my < topY + cellH * ROWS && mx > combX) {
+    const s = Math.floor(pos + 0.5 + (mx - combX) / cellW), L = strip.length, idx = ((s % L) + L) % L;
+    const r = ROWS - 1 - Math.floor((my - topY) / cellH);
+    strip[idx][r] = !strip[idx][r];
+    if (strip[idx][r]) pluck(r);
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (dragCrank === null) return;
+  const ang = Math.atan2(e.clientY - crank.y, e.clientX - crank.x);
+  let d = ang - dragCrank; if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI;
+  dragCrank = ang; crank.a += d; advance(d / 0.9);      // turning the crank pulls the paper through
+});
+addEventListener('pointerup', () => dragCrank = null);
+
+function load(name) {
+  strip = name ? parse(SONGS[name]) : Array.from({ length: 64 }, () => new Array(ROWS).fill(false));
+  pos = -0.001; lastStep = -1;
+}
+const sel = document.getElementById('song');
+for (const n of Object.keys(SONGS)) sel.add(new Option(n, n));
+sel.add(new Option('My own tune', ''));
+sel.onchange = () => load(sel.value);
+document.getElementById('play').onclick = () => { audio(); playing = !playing; document.getElementById('play').textContent = playing ? '❚❚ Pause' : '▶ Play'; };
+document.getElementById('clear').onclick = () => { sel.value = ''; load(''); };
+document.getElementById('share').onclick = () => {
+  // each column's holes become one base-36 number in the URL hash
+  const code = strip.map(c => c.reduce((n, on, r) => n | (on << r), 0).toString(36)).join('.');
+  history.replaceState(null, '', '#' + code);
+  navigator.clipboard?.writeText(location.href).then(() => alert('Link copied! Anyone who opens it hears your tune.'), () => alert('Your link is in the address bar.'));
+};
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); document.getElementById('play').click(); } });
+addEventListener('resize', size);
+setTimeout(() => document.getElementById('hint').style.opacity = 0, 12000);
+
+size();
+if (location.hash.length > 1) {
+  strip = location.hash.slice(1).split('.').map(v => { const n = parseInt(v, 36) || 0; return Array.from({ length: ROWS }, (_, r) => !!(n >> r & 1)); });
+  sel.value = ''; pos = -0.001;
+} else load('Jingle Bells');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 8 · Light the Tree</title>
+<style>
+  html,body { margin:0; height:100%; background:#060b18; overflow:hidden; font-family:system-ui,sans-serif; color:#eaf0ff; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:manipulation; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .hud { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:8px; align-items:center; font-size:14px; font-variant-numeric:tabular-nums; }
+  .hud span, .hud button { background:#0009; border:1px solid #ffffff22; color:#eaf0ff; border-radius:8px; padding:6px 10px; font:inherit; }
+  .hud button { cursor:pointer; }
+  #win { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(30px); opacity:0; transition:.5s; background:#111a33ee; border:1px solid #ffcf6e66;
+         border-radius:14px; padding:14px 20px; text-align:center; pointer-events:none; width:max-content; max-width:90vw; }
+  #win.on { opacity:1; transform:translateX(-50%); pointer-events:auto; }
+  #win button { margin-top:8px; background:#ffcf6e; color:#1a1200; border:none; border-radius:8px; padding:8px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  .hint { position:fixed; top:52px; left:50%; transform:translateX(-50%); font-size:13px; color:#eaf0ff99; text-align:center; width:max-content; max-width:92vw; transition:opacity 1s; pointer-events:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="hud"><span id="lvl">Level 1</span><span id="moves">0 moves</span><button id="shuffle">New tree</button></div>
+<div class="hint" id="hint">Click a branch to turn it (right-click turns it back). Connect every bulb to the power at the trunk.</div>
+<canvas id="c"></canvas>
+<div id="win"><div id="wintext"></div><button id="next">Next tree →</button></div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const N = 1, E = 2, S = 4, Wd = 8, DIRS = [[N, -1, 0], [E, 0, 1], [S, 1, 0], [Wd, 0, -1]];
+const OPP = { 1: 4, 2: 8, 4: 1, 8: 2 };
+const rotCW = m => ((m << 1) | (m >> 3)) & 15;
+const BULBS = ['#ff4d5e', '#ffd34d', '#4dd2ff', '#ff7ae6', '#7dff8a', '#ffa64d'];
+let W, H, DPR, T, ox, oy, level = 1, R, C, cells, moves, solvedAt = 0, startT, snow = [];
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+level = +store.get('lightTreeLevel') || 1;
+
+const widthOf = r => 1 + 2 * Math.round(r * 0.62);
+function build() {
+  R = 4 + level; C = widthOf(R - 1);
+  const cc = (C - 1) / 2;
+  cells = [];
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++)
+    if (Math.abs(c - cc) <= (widthOf(r) - 1) / 2) cells.push({ r, c, m: 0, rot: 0, ang: 0, litAt: 0, color: BULBS[(Math.random() * BULBS.length) | 0] });
+  const at = (r, c) => cells.find(k => k.r === r && k.c === c);
+  // random spanning tree (randomised Prim's) grown from the cell above the trunk
+  const root = at(R - 1, cc); root.m |= S; root.in = true;
+  const frontier = [];
+  const addEdges = k => DIRS.forEach(([d, dr, dc]) => { const n = at(k.r + dr, k.c + dc); if (n && !n.in) frontier.push([k, n, d]); });
+  addEdges(root);
+  while (frontier.length) {
+    const [a, b, d] = frontier.splice((Math.random() * frontier.length) | 0, 1)[0];
+    if (b.in) continue;
+    a.m |= d; b.m |= OPP[d]; b.in = true; addEdges(b);
+  }
+  // scramble: every piece gets a random turn
+  for (const k of cells) { k.base = k.m; k.rot = (Math.random() * 4) | 0; k.ang = k.rot * Math.PI / 2; k.bulb = popcount(k.base) === 1; }
+  cells.root = root; cells.at = at;
+  while (reach().size === cells.length) cells[0].rot = (cells[0].rot + 1) % 4;   // never start already solved
+  cells[0].ang = cells[0].rot * Math.PI / 2;
+  moves = 0; solvedAt = 0; startT = performance.now();
+  document.getElementById('win').classList.remove('on');
+  hud(); light(true); layout();
+}
+const popcount = m => (m & 1) + (m >> 1 & 1) + (m >> 2 & 1) + (m >> 3 & 1);
+const maskOf = k => { let m = k.base; for (let i = 0; i < k.rot; i++) m = rotCW(m); return m; };
+
+// Flood the power from the trunk through every pair of touching wires.
+function light(silent) {
+  const now = performance.now(), seen = reach();
+  let newBulbs = 0;
+  for (const k of cells) {
+    if (seen.has(k)) { if (!k.litAt) { k.litAt = now + seen.get(k) * 45; if (k.bulb) newBulbs++; } }
+    else k.litAt = 0;
+  }
+  if (!silent && newBulbs) for (let i = 0; i < Math.min(newBulbs, 6); i++) setTimeout(() => ping(523 * 2 ** ([0, 2, 4, 7, 9, 12][i] / 12), 0.12), i * 70);
+  if (seen.size === cells.length && !solvedAt) win();
+}
+function reach() {                     // which pieces the power reaches, and how many steps from the trunk
+  const seen = new Map(), root = cells.root;
+  if (maskOf(root) & S) {
+    const q = [[root, 0]]; seen.set(root, 0);
+    while (q.length) {
+      const [k, depth] = q.shift(), m = maskOf(k);
+      for (const [d, dr, dc] of DIRS) {
+        if (!(m & d)) continue;
+        const n = cells.at(k.r + dr, k.c + dc);
+        if (n && !seen.has(n) && (maskOf(n) & OPP[d])) { seen.set(n, depth + 1); q.push([n, depth + 1]); }
+      }
+    }
+  }
+  return seen;
+}
+
+function win() {
+  solvedAt = performance.now();
+  const secs = Math.round((solvedAt - startT) / 1000);
+  const best = +store.get('lightTreeBest' + level) || Infinity;
+  if (moves < best) store.set('lightTreeBest' + level, moves);
+  document.getElementById('wintext').innerHTML = `<b>The tree is lit!</b><br>Level ${level} in ${moves} moves and ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` +
+    (moves < best && best !== Infinity ? ' · new best!' : best !== Infinity ? ` · best ${best}` : '');
+  setTimeout(() => { document.getElementById('win').classList.add('on'); [0, 4, 7, 12, 16, 19, 24].forEach((s, i) => setTimeout(() => ping(392 * 2 ** (s / 12), 0.15), i * 110)); }, cells.length * 12 + 400);
+}
+
+function layout() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  T = Math.floor(Math.min(W * 0.92 / C, (H - 150) / (R + 2.2)));
+  ox = (W - T * C) / 2; oy = (H - T * (R + 2)) / 2 + T * 1.1;
+  snow = Array.from({ length: 140 }, () => ({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + .5, s: Math.random() * .5 + .2 }));
+}
+
+function draw(now) {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#04070f'); g.addColorStop(1, '#13224a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  for (const f of snow) { f.y += f.s; if (f.y > H) f.y = -2; ctx.globalAlpha = .5; ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#dfe8ff'; ctx.beginPath(); ctx.ellipse(W / 2, oy + T * (R + 1.3), W * 0.6, T * 0.8, 0, 0, 7); ctx.fill();
+
+  const cx = k => ox + k.c * T + T / 2, cy = k => oy + k.r * T + T / 2;
+  const allLit = !!solvedAt && now > solvedAt;
+  // trunk / power source
+  const tx = ox + ((C - 1) / 2) * T + T / 2, ty = oy + R * T + T / 2;
+  ctx.fillStyle = '#5a3a1e'; ctx.fillRect(tx - T * 0.28, oy + R * T, T * 0.56, T * 0.9);
+  ctx.strokeStyle = '#ffd66b'; ctx.lineWidth = T * 0.12; ctx.shadowColor = '#ffb84d'; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(tx, oy + R * T); ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffd66b'; ctx.beginPath(); ctx.arc(tx, ty, T * 0.13, 0, 7); ctx.fill();
+
+  // needles
+  for (const k of cells) {
+    ctx.fillStyle = (k.r + k.c) % 2 ? '#14532b' : '#176131';
+    ctx.beginPath(); ctx.roundRect(ox + k.c * T + 1, oy + k.r * T + 1, T - 2, T - 2, T * 0.18); ctx.fill();
+  }
+  // wires and bulbs, each piece drawn rotated by its animated angle
+  for (const k of cells) {
+    const target = k.rot * Math.PI / 2;
+    k.ang += (target - k.ang) * 0.25;
+    const lit = k.litAt && now >= k.litAt;
+    ctx.save(); ctx.translate(cx(k), cy(k)); ctx.rotate(k.ang);
+    ctx.strokeStyle = lit ? '#ffd66b' : '#2f4434'; ctx.lineWidth = T * 0.12; ctx.lineCap = 'round';
+    if (lit) { ctx.shadowColor = '#ffb84d'; ctx.shadowBlur = T * 0.3; }
+    ctx.beginPath();
+    for (const [d, dr, dc] of DIRS) if (k.base & d) { ctx.moveTo(0, 0); ctx.lineTo(dc * T / 2, dr * T / 2); }
+    ctx.stroke(); ctx.shadowBlur = 0;
+    if (k.bulb) {
+      const tw = allLit ? 0.7 + 0.3 * Math.sin(now / 200 + k.c * 1.7 + k.r) : 1;
+      if (lit) {
+        const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, T * 0.9);
+        halo.addColorStop(0, k.color + 'aa'); halo.addColorStop(1, k.color + '00');
+        ctx.fillStyle = halo; ctx.globalAlpha = tw; ctx.beginPath(); ctx.arc(0, 0, T * 0.9, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+      }
+      ctx.fillStyle = lit ? k.color : '#1d2a22'; ctx.strokeStyle = lit ? '#fff8' : k.color + '66'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, T * 0.22, 0, 7); ctx.fill(); ctx.stroke();
+      if (lit) { ctx.fillStyle = '#fffc'; ctx.beginPath(); ctx.arc(-T * 0.07, -T * 0.07, T * 0.06, 0, 7); ctx.fill(); }
+    } else {
+      ctx.fillStyle = lit ? '#ffd66b' : '#2f4434'; ctx.beginPath(); ctx.arc(0, 0, T * 0.09, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // the star lights up when everything is connected
+  const sx = ox + ((C - 1) / 2) * T + T / 2, sy = oy - T * 0.55, sr = T * 0.55;
+  ctx.save(); ctx.translate(sx, sy); ctx.rotate(allLit ? Math.sin(now / 600) * 0.08 : 0);
+  if (allLit) { ctx.shadowColor = '#ffe27a'; ctx.shadowBlur = 30 + 10 * Math.sin(now / 150); }
+  ctx.fillStyle = allLit ? '#ffe27a' : '#3a3a2a';
+  ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, d = i % 2 ? sr * 0.45 : sr; ctx.lineTo(Math.cos(a) * d, Math.sin(a) * d); } ctx.fill();
+  ctx.restore();
+}
+
+// ---- sound ----
+let ac;
+function ping(f, vol = 0.1, len = 0.4) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+  o.type = 'triangle'; o.frequency.value = f;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + len);
+}
+
+function hud() {
+  document.getElementById('lvl').textContent = `Level ${level}`;
+  document.getElementById('moves').textContent = `${moves} move${moves === 1 ? '' : 's'}`;
+}
+function turn(e, dir) {
+  if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  if (solvedAt) return;
+  const c = Math.floor((e.clientX - ox) / T), r = Math.floor((e.clientY - oy) / T);
+  const k = cells.find(k => k.r === r && k.c === c);
+  if (!k) return;
+  k.rot = (k.rot + dir + 4) % 4;
+  moves++; hud(); ping(dir > 0 ? 880 : 660, 0.05, 0.06);
+  const target = k.rot * Math.PI / 2;           // shift the drawn angle by whole turns so it animates the short way
+  while (k.ang - target > Math.PI) k.ang -= 2 * Math.PI;
+  while (target - k.ang > Math.PI) k.ang += 2 * Math.PI;
+  light(false);
+  document.getElementById('hint').style.opacity = 0;
+}
+cv.addEventListener('click', e => turn(e, 1));
+cv.addEventListener('contextmenu', e => { e.preventDefault(); turn(e, -1); });
+document.getElementById('shuffle').onclick = build;
+document.getElementById('next').onclick = () => { level++; store.set('lightTreeLevel', level); build(); };
+addEventListener('resize', layout);
+build();
+(function loop(t) { draw(t); requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>

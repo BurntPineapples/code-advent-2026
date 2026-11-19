@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 16 · Snow Globe</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#120a08; font-family:system-ui,sans-serif; color:#f6ead8; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; cursor:grab; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  #shake { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); z-index:2; background:#e8c66a; color:#1a1200; border:none; border-radius:12px; padding:10px 22px; font:inherit; font-weight:700; font-size:16px; cursor:pointer; box-shadow:0 6px 24px #0008; }
+  .hint { position:fixed; top:14px; left:50%; transform:translateX(-50%); font-size:13px; color:#f6ead8aa; text-align:center; width:max-content; max-width:70vw; pointer-events:none; transition:opacity 1s; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:20px; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="hint" id="hint">Drag to turn it round · Space or the button to shake it</div>
+<canvas id="c"></canvas>
+<button id="shake">Shake it! ❄</button>
+<div id="err">Your browser couldn't start WebGL, which this day needs. Try Chrome, Edge or Firefox.</div>
+
+<script id="fs" type="x-shader">
+precision highp float;
+uniform vec2 R;        // resolution
+uniform float T;       // time
+uniform float SH;      // time of the last shake
+uniform vec2 CAM;      // camera yaw, pitch
+#define GROUND -0.55
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// ---- signed distance functions: how far is p from each shape? ----
+float sdBox(vec3 p, vec3 b) { vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); }
+float sdCone(vec3 p, float h, float r1, float r2) {           // capped cone (after Inigo Quilez)
+  vec2 q = vec2(length(p.xz), p.y), k1 = vec2(r2, h), k2 = vec2(r2 - r1, 2.0 * h);
+  vec2 ca = vec2(q.x - min(q.x, (q.y < 0.0) ? r1 : r2), abs(q.y) - h);
+  vec2 cb = q - k1 + k2 * clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0, 1.0);
+  float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+  return s * sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+float sdPrism(vec3 p, vec2 h) { vec3 q = abs(p); return max(q.z - h.y, max(q.x * 0.866025 + p.y * 0.5, -p.y) - h.x * 0.5); }
+
+// the little world inside the glass: snowy ground, a tree with a star, a cottage
+vec2 world(vec3 p) {
+  vec2 res = vec2(p.y - (GROUND + 0.012 * sin(p.x * 11.0) * sin(p.z * 9.0)), 1.0);
+  vec3 q = p - vec3(0.27, GROUND, 0.08);
+  float tr = sdCone(q - vec3(0.0, 0.17, 0.0), 0.1, 0.17, 0.07);
+  tr = min(tr, sdCone(q - vec3(0.0, 0.31, 0.0), 0.08, 0.13, 0.04));
+  tr = min(tr, sdCone(q - vec3(0.0, 0.43, 0.0), 0.06, 0.09, 0.0));
+  if (tr < res.x) res = vec2(tr, 2.0);
+  float trunk = sdBox(q - vec3(0.0, 0.04, 0.0), vec3(0.025, 0.05, 0.025)); if (trunk < res.x) res = vec2(trunk, 3.0);
+  float star = length(q - vec3(0.0, 0.51, 0.0)) - 0.028; if (star < res.x) res = vec2(star, 7.0);
+  vec3 h = p - vec3(-0.3, GROUND, -0.1); h.xz = rot(0.5) * h.xz;
+  float walls = sdBox(h - vec3(0.0, 0.09, 0.0), vec3(0.13, 0.09, 0.1)); if (walls < res.x) res = vec2(walls, 4.0);
+  float win = sdBox(h - vec3(0.0, 0.09, 0.1), vec3(0.04, 0.035, 0.012)); if (win < res.x) res = vec2(win, 6.0);
+  float door = sdBox(h - vec3(0.13, 0.06, 0.0), vec3(0.012, 0.06, 0.035)); if (door < res.x) res = vec2(door, 6.0);
+  float roof = sdPrism(h - vec3(0.0, 0.272, 0.0), vec2(0.185, 0.118)); if (roof < res.x) res = vec2(roof, 5.0);
+  float chim = sdBox(h - vec3(0.07, 0.3, -0.03), vec3(0.018, 0.05, 0.018)); if (chim < res.x) res = vec2(chim, 4.0);
+  return res;
+}
+vec3 worldNormal(vec3 p) {
+  vec2 e = vec2(0.0015, 0.0);
+  return normalize(vec3(world(p + e.xyy).x - world(p - e.xyy).x, world(p + e.yxy).x - world(p - e.yxy).x, world(p + e.yyx).x - world(p - e.yyx).x));
+}
+
+// the room around the globe, used for reflections and the blurry background
+vec3 room(vec3 d, float sharp) {
+  vec3 c = mix(vec3(0.04, 0.025, 0.02), vec3(0.13, 0.08, 0.06), d.y * 0.5 + 0.5);
+  c += vec3(1.0, 0.85, 0.6) * pow(max(dot(d, normalize(vec3(-0.7, 0.45, -0.55))), 0.0), 40.0 * sharp) * 1.6;   // a window
+  c += vec3(1.0, 0.42, 0.12) * pow(max(dot(d, normalize(vec3(0.8, -0.15, -0.6))), 0.0), 8.0) * 0.7;         // the fire
+  for (int i = 0; i < 14; i++) {                                                                              // fairy lights
+    float a = float(i) / 14.0 * 6.2832;
+    vec3 ld = normalize(vec3(cos(a), 0.4 + 0.08 * sin(a * 3.0), sin(a)));
+    vec3 lc = 0.55 + 0.45 * cos(vec3(0.0, 2.1, 4.2) + float(i) * 1.7);
+    c += lc * pow(max(dot(d, ld), 0.0), 600.0 * sharp) * 2.5;
+  }
+  return c;
+}
+
+// snowflakes: stored per column of a grid, each falls (and swirls) since the last shake
+float snow(vec3 p, float age) {
+  p.xz = rot(3.5 * (1.0 - exp(-age * 0.7))) * p.xz;
+  float CS = 0.1, a = 0.0;
+  vec2 cell = floor(p.xz / CS);
+  for (int k = 0; k < 3; k++) {
+    float fk = float(k);
+    float h1 = hash(cell + fk * 7.31), h2 = hash(cell * 1.7 + fk * 3.1), h3 = hash(cell * 2.3 - fk * 1.9);
+    vec2 cxz = (cell + 0.15 + 0.7 * vec2(h1, h2)) * CS + 0.012 * sin(T * 1.5 + h3 * 40.0);
+    float y = max(GROUND + 0.016, mix(-0.4, 0.9, h3) + 0.35 * exp(-age * 1.8) * h1 - mix(0.035, 0.11, h2) * age);
+    vec3 d = vec3(p.x - cxz.x, p.y - y, p.z - cxz.y);
+    a += smoothstep(0.013, 0.003, length(d));
+  }
+  return a;
+}
+
+vec3 shadeWorld(vec3 p, float m) {
+  vec3 n = worldNormal(p), L = normalize(vec3(0.4, 0.9, 0.5));
+  float dif = max(dot(n, L), 0.0), amb = 0.35 + 0.25 * n.y;
+  vec3 alb = vec3(0.92, 0.95, 1.0);
+  if (m == 2.0) alb = mix(vec3(0.06, 0.32, 0.14), vec3(0.95), smoothstep(0.55, 0.85, n.y));
+  if (m == 3.0) alb = vec3(0.3, 0.17, 0.08);
+  if (m == 4.0) alb = vec3(0.62, 0.12, 0.1);
+  if (m == 5.0) alb = vec3(0.95);
+  vec3 col = alb * (dif * vec3(1.0, 0.95, 0.85) + amb * vec3(0.45, 0.5, 0.65));
+  vec3 wp = vec3(-0.3, GROUND + 0.09, -0.1); wp.xz += vec2(-0.0479, 0.0878);       // window position in world space
+  col += vec3(1.0, 0.55, 0.2) * 0.012 / (dot(p - wp, p - wp) + 0.004) * (m == 1.0 ? 1.0 : 0.4);
+  if (m == 6.0) col = vec3(1.0, 0.7, 0.3) * (1.2 + 0.15 * sin(T * 7.0));
+  if (m == 7.0) col = vec3(1.0, 0.85, 0.3) * 2.0;
+  return col;
+}
+
+float base(vec3 p) {
+  vec3 q = p - vec3(0.0, -1.08, 0.0);
+  float r = mix(0.74, 0.6, smoothstep(-0.25, 0.25, q.y));
+  float body = max(length(q.xz) - r, abs(q.y) - 0.25);
+  float rim = max(length(q.xz) - 0.66, abs(q.y - 0.24) - 0.035);
+  float foot = max(length(q.xz) - 0.8, abs(q.y + 0.22) - 0.04);
+  return min(body, min(rim, foot));
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * R) / R.y;
+  vec3 ta = vec3(0.0, -0.32, 0.0);
+  vec3 ro = ta + 4.5 * vec3(cos(CAM.y) * sin(CAM.x), sin(CAM.y), cos(CAM.y) * cos(CAM.x));
+  vec3 fw = normalize(ta - ro), rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0))), up = cross(rt, fw);
+  vec3 rd = normalize(fw * 1.9 + uv.x * rt + uv.y * up);
+
+  vec3 col = room(rd, 0.15) * 0.45;                   // blurry room behind
+  float tTable = rd.y < 0.0 ? (-1.33 - ro.y) / rd.y : 1e9;
+  if (tTable < 1e8) {                                 // a wooden table
+    vec3 p = ro + rd * tTable;
+    float grain = 0.5 + 0.5 * sin(p.x * 18.0 + sin(p.z * 3.0) * 2.0);
+    col = mix(vec3(0.17, 0.085, 0.04), vec3(0.22, 0.115, 0.055), grain) * (0.5 + 0.5 * smoothstep(0.4, 1.3, length(p.xz)));
+    col += room(reflect(rd, vec3(0, 1, 0)), 0.15) * 0.12;
+    col = mix(col, vec3(0.05, 0.03, 0.02), smoothstep(6.0, 12.0, tTable));
+  }
+  // the base, by sphere tracing
+  float tb = 0.0, hitB = 1e9;
+  for (int i = 0; i < 70; i++) { float d = base(ro + rd * tb); if (d < 0.001) { hitB = tb; break; } tb += d; if (tb > 8.0) break; }
+  // the glass, by exact ray-sphere intersection
+  float b = dot(ro, rd), c = dot(ro, ro) - 1.0, disc = b * b - c;
+  float ts = disc > 0.0 ? -b - sqrt(disc) : 1e9;
+
+  if (hitB < ts && hitB < tTable) {
+    vec3 p = ro + rd * hitB; vec2 e = vec2(0.001, 0.0);
+    vec3 n = normalize(vec3(base(p + e.xyy) - base(p - e.xyy), base(p + e.yxy) - base(p - e.yxy), base(p + e.yyx) - base(p - e.yyx)));
+    vec3 q = p - vec3(0.0, -1.08, 0.0);
+    bool gold = abs(q.y - 0.24) < 0.04 || abs(q.y + 0.22) < 0.045;
+    vec3 refl = room(reflect(rd, n), gold ? 0.6 : 0.2);
+    col = gold ? refl * vec3(1.0, 0.78, 0.4) * 1.4 : vec3(0.22, 0.05, 0.04) * (0.4 + 0.6 * max(dot(n, normalize(vec3(0.4, 0.8, 0.5))), 0.0)) + refl * 0.12;
+  } else if (ts < 1e8) {
+    vec3 p = ro + rd * ts, n = p;
+    float fres = 0.04 + 0.96 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
+    vec3 r2 = refract(rd, n, 1.0 / 1.06);
+    float b2 = dot(p, r2), tExit = -b2 + sqrt(max(b2 * b2 - (dot(p, p) - 1.0), 0.0));
+    float age = T - SH, tt = 0.0, trans = 1.0, m = 0.0;
+    vec3 acc = vec3(0.0), hp = vec3(0.0);
+    for (int i = 0; i < 180; i++) {
+      if (tt > tExit) break;
+      vec3 x = p + r2 * tt;
+      vec2 w = world(x);
+      float s = snow(x, age);
+      if (s > 0.0) { float a = min(s * 0.85, 1.0); acc += trans * a * vec3(1.0, 1.0, 1.03); trans *= 1.0 - a; }
+      if (w.x < 0.0015) { m = w.y; hp = x; break; }
+      tt += clamp(w.x, 0.004, 0.012);
+    }
+    vec3 inside = m > 0.0 ? shadeWorld(hp, m) : room(r2, 0.05) * 0.5;
+    col = (inside * trans + acc) * vec3(0.94, 0.97, 1.0);
+    col = mix(col, room(reflect(rd, n), 1.0), fres);
+    col += vec3(1.0, 0.9, 0.75) * pow(max(dot(reflect(rd, n), normalize(vec3(-0.7, 0.45, -0.55))), 0.0), 120.0) * 1.2;
+  }
+  col *= 1.0 - 0.35 * dot(uv, uv);                     // vignette
+  col = pow(col / (1.0 + col * 0.25), vec3(0.4545));    // gentle tone map + gamma
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+<script>
+const cv = document.getElementById('c');
+const gl = cv.getContext('webgl', { antialias: false });
+if (!gl) document.getElementById('err').style.display = 'flex';
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s)); document.getElementById('err').style.display = 'flex'; }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);   // one triangle covers the screen
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n), uR = U('R'), uT = U('T'), uSH = U('SH'), uCAM = U('CAM');
+
+let quality = 0.75, yaw = 0.35, pitch = 0.2, vyaw = 0, shakeT = 0, start = performance.now(), slow = 0;
+function size() {
+  const dpr = Math.min(devicePixelRatio || 1, 2) * quality;
+  cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  gl.viewport(0, 0, cv.width, cv.height);
+}
+let last = performance.now();
+function frame(now) {
+  const dt = (now - last) / 1000; last = now;
+  // adapt the resolution so slower GPUs stay smooth
+  if (dt > 0.045 && quality > 0.4) { if (++slow > 20) { quality -= 0.1; size(); slow = 0; } } else slow = 0;
+  if (!drag) { yaw += 0.08 * Math.min(dt, 0.05) + vyaw; vyaw *= 0.95; }
+  gl.uniform2f(uR, cv.width, cv.height); gl.uniform1f(uT, (now - start) / 1000);
+  gl.uniform1f(uSH, shakeT); gl.uniform2f(uCAM, yaw, pitch);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+function shake() { shakeT = (performance.now() - start) / 1000; document.getElementById('hint').style.opacity = 0; }
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, vx: 0 }; cv.setPointerCapture(e.pointerId); cv.style.cursor = 'grabbing'; });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  yaw -= dx * 0.008; pitch = Math.max(-0.15, Math.min(1.0, pitch + dy * 0.005)); drag.vx = -dx * 0.008;
+  if (Math.abs(dx) > 40) shake();                         // a hard flick shakes it too
+  drag.x = e.clientX; drag.y = e.clientY;
+});
+addEventListener('pointerup', () => { if (drag) vyaw = drag.vx * 0.3; drag = null; cv.style.cursor = 'grab'; });
+document.getElementById('shake').onclick = shake;
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); shake(); } });
+addEventListener('resize', size);
+size(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

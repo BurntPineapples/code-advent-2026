@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 3 · No Two Alike</title>
+<style>
+  html,body { margin:0; min-height:100%; background:radial-gradient(circle at 50% 40%, #0f2348, #030712 70%); color:#d8e8ff; font-family:system-ui,sans-serif; overflow:hidden; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0007; padding:6px 10px; border-radius:8px; }
+  .stage { height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; }
+  canvas#c { width:min(86vw, 70vh); height:min(86vw, 70vh); image-rendering:auto; }
+  .info { font-size:13px; color:#a9c3ee; text-align:center; font-variant-numeric:tabular-nums; min-height:1.3em; padding:0 16px; }
+  .row { display:flex; gap:8px; }
+  button { background:#ffffff12; color:#d8e8ff; border:1px solid #ffffff2a; border-radius:8px; padding:7px 14px; font:inherit; font-size:14px; cursor:pointer; }
+  button:hover { background:#ffffff22; }
+  #gallery { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; max-width:94vw; min-height:52px; }
+  #gallery canvas { width:52px; height:52px; border-radius:50%; background:#04091a; box-shadow:0 0 0 1px #ffffff1a; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="stage">
+  <canvas id="c" width="640" height="640"></canvas>
+  <div class="info" id="info"></div>
+  <div class="row"><button id="new">New flake (N)</button><button id="save">Save PNG</button></div>
+  <div id="gallery"></div>
+</div>
+<script>
+// Reiter's hexagonal cellular automaton (2005). Every cell holds an amount of water s.
+// Frozen cells (s >= 1) and their neighbours are "receptive": they keep their water and gain a little (gamma).
+// Everything else shares water with its neighbours by diffusion (alpha). Background vapour level = beta.
+const N = 261, C = (N - 1) / 2, RMAX = C - 6;
+const P = 640, cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const img = ctx.createImageData(P, P);
+let s, u, frozenAt, alpha, beta, gamma, steps, radius, done, seed;
+
+// neighbour offsets in axial hex coordinates (q, r) stored row-major: index = r * N + q
+const NB = [1, -1, N, -N, N - 1, -N + 1];
+const hexDist = (q, r) => { const dq = q - C, dr = r - C; return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2; };
+
+// Precompute which hex cell every output pixel falls in (pointy-top hexes).
+const pix = new Int32Array(P * P).fill(-1);
+{
+  const scale = (P / 2 - 6) / (RMAX + 2);
+  for (let py = 0; py < P; py++) for (let px = 0; px < P; px++) {
+    const x = (px - P / 2) / scale, y = (py - P / 2) / scale;
+    // pixel → fractional axial → cube rounding
+    let qf = x - y / Math.sqrt(3), rf = y * 2 / Math.sqrt(3), sf = -qf - rf;
+    let q = Math.round(qf), r = Math.round(rf), z = Math.round(sf);
+    const dq = Math.abs(q - qf), dr = Math.abs(r - rf), dz = Math.abs(z - sf);
+    if (dq > dr && dq > dz) q = -r - z; else if (dr > dz) r = -q - z;
+    q += C; r += C;
+    if (q >= 1 && r >= 1 && q < N - 1 && r < N - 1 && hexDist(q, r) <= RMAX + 2) pix[py * P + px] = r * N + q;
+  }
+}
+
+const rand = (a, b) => a + Math.random() * (b - a);
+function newFlake() {
+  // parameter ranges that reliably give pretty, varied flakes
+  const kind = Math.random();
+  if (kind < 0.35)      { alpha = rand(1.6, 2.4); beta = rand(0.38, 0.45); gamma = rand(0.0005, 0.002); }   // ferny dendrites
+  else if (kind < 0.7)  { alpha = rand(0.8, 1.6); beta = rand(0.45, 0.65); gamma = rand(0.001, 0.004); }   // stellar plates
+  else                  { alpha = rand(0.5, 1.2); beta = rand(0.3, 0.42); gamma = rand(0.003, 0.009); }    // chunky plates
+  s = new Float32Array(N * N).fill(beta); u = new Float32Array(N * N);
+  frozenAt = new Int32Array(N * N).fill(0);
+  s[C * N + C] = 1; frozenAt[C * N + C] = 1;
+  steps = 1; radius = 0; done = false; seed = Math.random().toString(36).slice(2, 7).toUpperCase();
+}
+
+function step() {
+  // Only cells inside a box around the crystal change; outside it vapour sits at beta.
+  const R = Math.min(C - 2, Math.ceil(radius) + 24), lo = C - R, hi = C + R;
+  for (let r = lo; r <= hi; r++) for (let q = lo; q <= hi; q++) {
+    const i = r * N + q;
+    let rec = frozenAt[i] > 0;
+    if (!rec) for (let k = 0; k < 6; k++) if (frozenAt[i + NB[k]]) { rec = true; break; }
+    if (rec) { u[i] = 0; s[i] += gamma; } else { u[i] = s[i]; s[i] = 0; }   // s now holds v
+  }
+  for (let r = lo; r <= hi; r++) for (let q = lo; q <= hi; q++) {
+    const i = r * N + q;
+    const edge = r === lo || r === hi || q === lo || q === hi;
+    const uu = edge ? beta : u[i];
+    let sum = 0;
+    for (let k = 0; k < 6; k++) { const j = i + NB[k], jr = (j / N) | 0, jq = j - jr * N;
+      sum += (jr < lo || jr > hi || jq < lo || jq > hi) ? beta : u[j]; }
+    const un = uu + alpha / 12 * (sum - 6 * uu);
+    s[i] = edge ? beta : s[i] + un;
+    if (s[i] >= 1 && !frozenAt[i]) {
+      frozenAt[i] = steps;
+      const d = hexDist(q, r); if (d > radius) radius = d;
+    }
+  }
+  steps++;
+  if (radius >= RMAX || steps > 12000) done = true;
+}
+
+function render() {
+  const d = img.data, t = steps;
+  for (let p = 0, j = 0; p < pix.length; p++, j += 4) {
+    const i = pix[p];
+    if (i < 0) { d[j + 3] = 0; continue; }
+    const f = frozenAt[i];
+    if (f) {
+      // colour by when the cell froze (growth rings) and how much ice it holds (ridges)
+      const ice = Math.min(1, (s[i] - 1) * 1.6);
+      const ring = 0.5 + 0.5 * Math.cos(f * 0.06);
+      let rim = 0; for (let k = 0; k < 6; k++) if (!frozenAt[i + NB[k]]) { rim = 1; break; }
+      const v = Math.min(1, 0.25 + 0.4 * ice + 0.2 * ring + 0.4 * rim);
+      d[j] = 70 + 185 * v; d[j + 1] = 130 + 125 * v; d[j + 2] = 210 + 45 * v; d[j + 3] = 255;
+    } else {
+      // vapour: faint glow where the crystal has drained the air
+      const dep = Math.max(0, beta - s[i]) / beta;
+      d[j] = 40; d[j + 1] = 90; d[j + 2] = 170; d[j + 3] = dep * 140;
+    }
+  }
+  ctx.clearRect(0, 0, P, P);
+  ctx.putImageData(img, 0, 0);
+  document.getElementById('info').textContent =
+    `Flake #${seed} · α ${alpha.toFixed(2)} · β ${beta.toFixed(3)} · γ ${gamma.toFixed(4)} · step ${steps}` + (done ? ' · complete' : '');
+}
+
+function addToGallery() {
+  const g = document.getElementById('gallery'), t = document.createElement('canvas');
+  t.width = t.height = 104; t.getContext('2d').drawImage(cv, 0, 0, 104, 104);
+  t.title = `#${seed}`; g.prepend(t);
+  while (g.children.length > 10) g.lastChild.remove();
+}
+
+let pauseUntil = 0;
+function frame(now) {
+  if (!done) {
+    const t0 = performance.now();
+    const target = radius + RMAX / 540;                        // grow about 1/540 of the way per frame (~9 s total)
+    while (!done && radius < target && performance.now() - t0 < 12) step();
+    render();
+    if (done) { addToGallery(); pauseUntil = now + 4000; }
+  } else if (now > pauseUntil) { newFlake(); }
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('new').onclick = () => { if (!done && steps > 50) addToGallery(); newFlake(); };
+document.getElementById('save').onclick = () => { const a = document.createElement('a'); a.download = `snowflake-${seed}.png`; a.href = cv.toDataURL(); a.click(); };
+addEventListener('keydown', e => { if (e.key === 'n' || e.key === 'N') document.getElementById('new').click(); });
+newFlake(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

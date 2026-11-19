@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 14 · Reindeer Flight School</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#060a1a; font-family:system-ui,sans-serif; color:#eef2ff; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; max-width:calc(100vw - 130px); }
+  .bar button { background:#000a; color:#eef2ff; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  .bar button.on { background:#ffcf6e; color:#1a1200; }
+  #race { background:#c4142a; border-color:#ff6b7a; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="bar" id="bar"><button id="race">🦌 Race the champion</button></div>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const VW = 900, VH = 600, GROUND = 545, DX = 170, R = 13;      // the world is 900×600, scaled to fit
+const POP = 250, NIN = 5, NH = 8, NWT = (NIN + 1) * NH + (NH + 1);
+const SPEED = 230, GAP0 = 165, FINISH = 100, SPACING = 290, OW = 64;
+let W, H, DPR, scale, offX, offY;
+
+// ---------- the brain: 5 senses → 8 hidden neurons → 1 decision ----------
+const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+function think(w, inp, keep) {
+  const h = new Float32Array(NH); let o = w[NWT - 1];
+  for (let j = 0; j < NH; j++) {
+    let s = w[j * (NIN + 1) + NIN];
+    for (let i = 0; i < NIN; i++) s += w[j * (NIN + 1) + i] * inp[i];
+    h[j] = Math.tanh(s); o += w[(NIN + 1) * NH + j] * h[j];
+  }
+  const out = 1 / (1 + Math.exp(-o));
+  if (keep) keep.h = h, keep.out = out, keep.inp = inp;
+  return out;
+}
+
+// ---------- the course: chimneys from below, icicles from above ----------
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let x = Math.imul(seed ^ seed >>> 15, 1 | seed); x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x; return ((x ^ x >>> 14) >>> 0) / 4294967296; }; }
+let course, rand;
+function makeCourse(seed) { rand = rng(seed); course = []; for (let i = 0; i < 4; i++) addObstacle(); }
+function addObstacle() {
+  const n = course.length, x = n ? course[n - 1].x + SPACING : 520;
+  const gap = Math.max(96, GAP0 - n * 0.9);            // it gets tighter the further you go
+  const mid = 110 + gap / 2 + rand() * (GROUND - 220 - gap);
+  course.push({ x, top: mid - gap / 2, bot: mid + gap / 2, idx: n, h: rand() });
+}
+
+// ---------- population ----------
+let gen = 1, deer, worldX, history = [], bestEver = { fit: 0, w: null }, speedMul = 1, mode = 'train', player = null;
+function newDeer(w) { return { w, y: VH * 0.4, vy: 0, alive: true, fit: 0, passed: 0, flapT: 0, act: {} }; }
+function startGen(pop) { deer = pop; worldX = 0; makeCourse(gen * 7919); }
+startGen(Array.from({ length: POP }, () => newDeer(Float32Array.from({ length: NWT }, () => gauss()))));
+
+function evolve() {
+  deer.sort((a, b) => b.fit - a.fit);
+  const best = deer[0], avg = deer.reduce((s, d) => s + d.fit, 0) / deer.length;
+  history.push({ best: best.passed, avg: deer.reduce((s, d) => s + d.passed, 0) / deer.length });
+  if (best.fit > bestEver.fit) bestEver = { fit: best.fit, w: best.w.slice(), passed: best.passed, gen };
+  const parents = deer.slice(0, Math.max(10, POP * 0.2 | 0));
+  const pick = () => { let a = parents[(Math.random() * parents.length) | 0], b = parents[(Math.random() * parents.length) | 0]; return a.fit > b.fit ? a : b; };
+  const next = deer.slice(0, 5).map(d => newDeer(d.w.slice()));                  // the elite fly again unchanged
+  const sigma = Math.max(0.15, 0.6 * Math.exp(-gen / 30));
+  while (next.length < POP) {
+    const a = pick(), b = pick(), w = new Float32Array(NWT);
+    for (let i = 0; i < NWT; i++) { w[i] = Math.random() < 0.5 ? a.w[i] : b.w[i]; if (Math.random() < 0.12) w[i] += gauss() * sigma; }
+    next.push(newDeer(w));
+  }
+  gen++; startGen(next);
+}
+
+function senses(d) {
+  const o = course.find(o => o.x - worldX + OW > DX - R);        // the next obstacle not yet passed
+  const ox = o.x - worldX;
+  return [d.y / VH, d.vy / 600, (ox - DX) / VW, (o.top - d.y) / VH, (o.bot - d.y) / VH];
+}
+function physics(d, flap, dt) {
+  if (flap && d.flapT <= 0) { d.vy = -430; d.flapT = 0.12; }
+  d.flapT -= dt; d.vy += 1500 * dt; d.y += d.vy * dt;
+  if (d.y < R || d.y > GROUND - R) d.alive = false;
+  for (const o of course) {
+    const ox = o.x - worldX;
+    if (DX + R > ox && DX - R < ox + OW && (d.y - R < o.top || d.y + R > o.bot)) d.alive = false;
+    if (!o.counted?.has(d) && ox + OW < DX - R) { (o.counted ||= new Set()).add(d); d.passed++; }
+  }
+  d.fit = worldX + d.passed * 200;
+}
+
+function step(dt) {
+  worldX += SPEED * dt;
+  while (course[course.length - 1].x - worldX < VW + 200) addObstacle();
+  course = course.filter(o => o.x - worldX > -OW - 20);
+  let alive = 0;
+  for (const d of deer) {
+    if (!d.alive) continue;
+    const out = think(d.w, senses(d), d === leader() ? d.act : null);
+    physics(d, out > 0.5, dt);
+    if (d.alive) alive++;
+  }
+  if (player && player.alive) { physics(player, player.flapNow, dt); player.flapNow = false; }
+  const done = deer.some(d => d.alive && d.passed >= FINISH);       // the course ends at the 100th chimney
+  if (mode === 'train' && (!alive || done)) { if (done) { raceResult = `Generation ${gen} flew the whole course!`; raceResultT = 2.5; } evolve(); }
+  if (mode === 'race' && done) deer.forEach(d => d.alive = false), player && (player.alive = false);
+  if (mode === 'race' && !alive && !(player && player.alive)) setTimeout(() => endRace(), 1200), mode = 'raceover';
+}
+let leaderCache = null;
+function leader() { return leaderCache; }
+
+// ---------- race mode: you vs. the best brain so far ----------
+function startRace() {
+  if (!bestEver.w) return;
+  mode = 'race'; raceResultT = 0; player = newDeer(null); player.isPlayer = true;
+  deer = [newDeer(bestEver.w.slice())]; worldX = 0; makeCourse(424242);
+}
+function endRace() {
+  const c = deer[0];
+  raceResult = `${player.passed > c.passed ? 'You beat the AI!' : player.passed === c.passed ? 'A dead heat!' : 'The AI wins.'}  You: ${player.passed} · Champion: ${c.passed}`;
+  raceResultT = 4; mode = 'train'; player = null; startGen(deer.length === 1 ? lastPop : deer);
+}
+let raceResult = '', raceResultT = 0, lastPop = null;
+document.getElementById('race').onclick = () => {
+  if (!bestEver.w) { raceResult = 'Let it train for a generation first!'; raceResultT = 2.5; return; }
+  if (mode !== 'train') return; lastPop = deer.map(d => newDeer(d.w)); startRace(); };
+function flapPlayer() { if (player && player.alive) player.flapNow = true; }
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); flapPlayer(); } });
+cv.addEventListener('pointerdown', flapPlayer);
+
+// ---------- speed buttons ----------
+const bar = document.getElementById('bar');
+[['1×', 1], ['5×', 5], ['30×', 30], ['Max', 999]].forEach(([l, m]) => {
+  const b = document.createElement('button'); b.textContent = l; b.onclick = () => { speedMul = m; [...bar.children].forEach(x => x.classList.toggle('on', x === b)); };
+  if (m === 1) b.classList.add('on'); bar.insertBefore(b, document.getElementById('race'));
+});
+
+// ---------- drawing ----------
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  scale = Math.min(W / VW, (H - 250) / VH); offX = (W - VW * scale) / 2; offY = 50;   // leave room for the brain and chart
+}
+const stars = Array.from({ length: 90 }, () => [Math.random() * VW, Math.random() * GROUND * 0.8, Math.random()]);
+function drawDeer(y, vy, alpha, special) {
+  ctx.save(); ctx.translate(DX, y); ctx.rotate(Math.max(-0.5, Math.min(0.6, vy / 900))); ctx.globalAlpha = alpha;
+  const body = special === 'player' ? '#b5442e' : '#8a5a33';
+  ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, 16, 9, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(16, -8, 7, 5, -0.4, 0, 7); ctx.fill();
+  ctx.strokeStyle = body; ctx.lineWidth = 3; const leg = Math.sin(worldX * 0.08) * 5;
+  ctx.beginPath(); ctx.moveTo(-9, 5); ctx.lineTo(-13 + leg, 16); ctx.moveTo(8, 5); ctx.lineTo(5 - leg, 16); ctx.stroke();
+  ctx.strokeStyle = '#e0cfae'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(16, -12); ctx.lineTo(12, -24); ctx.lineTo(7, -27); ctx.moveTo(13, -20); ctx.lineTo(20, -25); ctx.stroke();
+  if (special === 'player') { ctx.fillStyle = '#2f8a4f'; ctx.fillRect(6, -6, 7, 8); }
+  if (special === 'leader') { ctx.strokeStyle = '#ffcf6e'; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(2, -4, 26, 22, 0, 0, 7); ctx.stroke(); }
+  ctx.restore();
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#060a1a'; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.translate(offX, offY); ctx.scale(scale, scale);
+  ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+  const sky = ctx.createLinearGradient(0, 0, 0, VH); sky.addColorStop(0, '#0a1233'); sky.addColorStop(1, '#2a3f7a');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = '#fff'; for (const [x, y, b] of stars) { ctx.globalAlpha = 0.3 + b * 0.5; ctx.fillRect((x - worldX * 0.05 % VW + VW) % VW, y, 2, 2); } ctx.globalAlpha = 1;
+  for (const o of course) {
+    const x = o.x - worldX;
+    // icicles hanging from a snow cloud
+    ctx.fillStyle = '#dfe9ff'; ctx.fillRect(x - 6, 0, OW + 12, Math.max(0, o.top - 26));
+    ctx.fillStyle = '#bcd4ff';
+    for (let k = 0; k < 5; k++) { const ix = x + k * OW / 5; ctx.beginPath(); ctx.moveTo(ix, o.top - 30); ctx.lineTo(ix + OW / 10, o.top - (k % 2 ? 0 : 8)); ctx.lineTo(ix + OW / 5, o.top - 30); ctx.fill(); }
+    // a chimney stack rising from below
+    ctx.fillStyle = '#7a3a2a'; ctx.fillRect(x, o.bot, OW, GROUND - o.bot);
+    ctx.fillStyle = '#5e2a1e'; for (let yy = o.bot + 10; yy < GROUND; yy += 14) ctx.fillRect(x, yy, OW, 2);
+    ctx.fillStyle = '#f2f6ff'; ctx.fillRect(x - 6, o.bot - 4, OW + 12, 12);
+  }
+  ctx.fillStyle = '#e8efff'; ctx.fillRect(0, GROUND, VW, VH - GROUND);
+  // the flock: ghosts for the population, a gold ring for the leader
+  let lead = null;
+  for (const d of deer) if (d.alive && (!lead || d.fit > lead.fit)) lead = d;
+  leaderCache = lead;
+  for (const d of deer) if (d.alive && d !== lead) drawDeer(d.y, d.vy, mode === 'train' ? 0.18 : 0.9);
+  if (lead) drawDeer(lead.y, lead.vy, 1, mode === 'train' ? 'leader' : null);
+  if (player && player.alive) drawDeer(player.y, player.vy, 1, 'player');
+  ctx.restore();
+
+  // HUD
+  const alive = deer.filter(d => d.alive).length, score = lead ? lead.passed : 0;
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(14, 20 * scale)}px system-ui`; ctx.textAlign = 'left';
+  const hudY = offY + 26 * scale + 4;
+  if (mode === 'train') ctx.fillText(`Generation ${gen} · ${alive}/${POP} still flying · chimneys passed: ${score} · best ever: ${bestEver.passed || 0}`, offX + 12, hudY);
+  else ctx.fillText(`RACE! Space / tap to flap · You: ${player ? player.passed : '–'} · Champion: ${deer[0].passed}`, offX + 12, hudY);
+  if (raceResultT > 0) { ctx.fillStyle = '#ffcf6e'; ctx.textAlign = 'center'; ctx.font = 'bold 28px system-ui'; ctx.fillText(raceResult, W / 2, offY + VH * scale / 2); }
+  drawBrain(lead); drawChart();
+}
+
+function drawBrain(d) {
+  const x0 = offX, y0 = offY + VH * scale + 10, w = Math.min(420, VW * scale * 0.55), h = H - y0 - 10;
+  if (h < 60) return;
+  ctx.fillStyle = '#0d1430'; ctx.fillRect(x0, y0, w, h);
+  ctx.fillStyle = '#9fb0e0'; ctx.font = '12px system-ui'; ctx.textAlign = 'left'; ctx.fillText("THE LEADER'S BRAIN, LIVE", x0 + 8, y0 + 15);
+  if (!d || !d.act.h) return;
+  const labels = ['height', 'speed', 'distance', 'gap top', 'gap bottom'];
+  const ix = x0 + 90, hx = x0 + w * 0.6, ox = x0 + w - 40, top = y0 + 26, span = h - 34;
+  const iy = i => top + (i + 0.5) * span / NIN, hy = j => top + (j + 0.5) * span / NH, oy = top + span / 2;
+  const wt = (i, j) => d.w[j * (NIN + 1) + i];
+  for (let j = 0; j < NH; j++) {
+    for (let i = 0; i < NIN; i++) { const v = wt(i, j); ctx.strokeStyle = v > 0 ? '#5ab0ff' : '#ff9a4d'; ctx.globalAlpha = Math.min(0.9, Math.abs(v) / 3); ctx.lineWidth = Math.min(3, Math.abs(v)); ctx.beginPath(); ctx.moveTo(ix, iy(i)); ctx.lineTo(hx, hy(j)); ctx.stroke(); }
+    const v = d.w[(NIN + 1) * NH + j]; ctx.strokeStyle = v > 0 ? '#5ab0ff' : '#ff9a4d'; ctx.globalAlpha = Math.min(0.9, Math.abs(v) / 3); ctx.lineWidth = Math.min(3, Math.abs(v)); ctx.beginPath(); ctx.moveTo(hx, hy(j)); ctx.lineTo(ox, oy); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const node = (x, y, a, r = 7) => { ctx.fillStyle = a > 0 ? `rgba(90,176,255,${0.25 + Math.abs(a) * 0.75})` : `rgba(255,154,77,${0.25 + Math.abs(a) * 0.75})`; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.strokeStyle = '#fff4'; ctx.lineWidth = 1; ctx.stroke(); };
+  for (let i = 0; i < NIN; i++) { node(ix, iy(i), Math.max(-1, Math.min(1, d.act.inp[i] * 2))); ctx.fillStyle = '#cfd8f5'; ctx.textAlign = 'right'; ctx.fillText(labels[i], ix - 12, iy(i) + 4); }
+  for (let j = 0; j < NH; j++) node(hx, hy(j), d.act.h[j]);
+  const flap = d.act.out > 0.5;
+  node(ox, oy, flap ? 1 : -0.3, 11); ctx.fillStyle = flap ? '#ffcf6e' : '#cfd8f5'; ctx.textAlign = 'left'; ctx.fillText(flap ? 'FLAP!' : 'glide', ox - 14, oy + 26);
+}
+function drawChart() {
+  const x0 = offX + Math.min(420, VW * scale * 0.55) + 10, y0 = offY + VH * scale + 10, w = offX + VW * scale - x0, h = H - y0 - 10;
+  if (h < 60 || w < 120) return;
+  ctx.fillStyle = '#0d1430'; ctx.fillRect(x0, y0, w, h);
+  ctx.fillStyle = '#9fb0e0'; ctx.font = '12px system-ui'; ctx.textAlign = 'left'; ctx.fillText('CHIMNEYS PASSED PER GENERATION  (gold: best · blue: average)', x0 + 8, y0 + 15);
+  if (history.length < 2) return;
+  const mx = Math.max(5, ...history.map(g => g.best)), n = history.length;
+  for (const [key, col] of [['avg', '#5ab0ff'], ['best', '#ffcf6e']]) {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+    history.forEach((g, i) => ctx.lineTo(x0 + 8 + i / (n - 1) * (w - 16), y0 + h - 8 - g[key] / mx * (h - 32)));
+    ctx.stroke();
+  }
+}
+
+addEventListener('resize', size); size();
+let last = 0;
+(function loop(now) {
+  const dt = 1 / 60, real = Math.min(0.1, (now - last) / 1000 || dt); last = now;
+  if (raceResultT > 0) raceResultT -= real;
+  const steps = mode === 'train' ? speedMul : 1, t0 = performance.now();
+  for (let s = 0; s < steps && performance.now() - t0 < 14; s++) { step(dt); if (s % 8 === 0) { let lead = null; for (const d of deer) if (d.alive && (!lead || d.fit > lead.fit)) lead = d; leaderCache = lead; } }
+  draw(); requestAnimationFrame(loop);
+})(0);
+</script>
+</body>
+</html>

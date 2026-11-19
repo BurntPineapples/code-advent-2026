@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 20 · A Million Snowflakes</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#050914; font-family:system-ui,sans-serif; color:#e8f0ff; user-select:none; }
+  canvas { position:fixed; inset:0; width:100vw; height:100vh; display:block; }
+  #gl { touch-action:none; cursor:crosshair; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:calc(100vw - 130px); }
+  .bar button { background:#000a; color:#e8f0ff; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  .bar button.on { background:#ffd27a; color:#1a1200; }
+  #stats { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:2; font-size:14px; font-variant-numeric:tabular-nums; color:#e8f0ffcc; text-align:center; width:max-content; max-width:92vw; text-shadow:0 1px 4px #000; pointer-events:none; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:20px; z-index:3; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<canvas id="bg"></canvas>
+<canvas id="gl"></canvas>
+<div class="bar" id="bar"></div>
+<div id="stats"></div>
+<div id="err">This one needs WebGL 2, which your browser doesn't seem to have. Try a recent Chrome, Edge, Firefox or Safari.</div>
+<script>
+// ---------- the street scene, painted once in 2D behind the snow ----------
+const bg = document.getElementById('bg'), b = bg.getContext('2d');
+const LAMP = { x: 0.68, y: 0.34 };                     // lamp head, as a fraction of the screen
+function paintBackground() {
+  const W = innerWidth, H = innerHeight, d = Math.min(devicePixelRatio || 1, 2);
+  bg.width = W * d; bg.height = H * d; b.setTransform(d, 0, 0, d, 0, 0);
+  const sky = b.createLinearGradient(0, 0, 0, H); sky.addColorStop(0, '#03060f'); sky.addColorStop(1, '#16223f');
+  b.fillStyle = sky; b.fillRect(0, 0, W, H);
+  const gy = H * 0.84;
+  let x = -20;                                                       // houses along the street
+  while (x < W) {
+    const w = 90 + Math.random() * 90, h = 70 + Math.random() * 90;
+    b.fillStyle = '#0b1020'; b.fillRect(x, gy - h, w, h);
+    b.beginPath(); b.moveTo(x - 6, gy - h); b.lineTo(x + w / 2, gy - h - 40); b.lineTo(x + w + 6, gy - h); b.fill();
+    b.fillStyle = '#dfe7ff'; b.beginPath(); b.moveTo(x - 6, gy - h); b.lineTo(x + w / 2, gy - h - 40); b.lineTo(x + w + 6, gy - h); b.lineTo(x + w / 2, gy - h - 32); b.fill();
+    for (let k = 0; k < 3; k++) if (Math.random() < 0.55) { b.fillStyle = '#ffc56a'; b.shadowColor = '#ffb040'; b.shadowBlur = 16; b.fillRect(x + 14 + k * (w - 28) / 3, gy - h + 20, 14, 18); b.shadowBlur = 0; }
+    x += w + 12 + Math.random() * 30;
+  }
+  b.fillStyle = '#cfd9f2'; b.fillRect(0, gy, W, H - gy);
+  const lx = W * LAMP.x, ly = H * LAMP.y;
+  const pool = b.createRadialGradient(lx, gy + 6, 0, lx, gy + 6, W * 0.22);  // pool of light on the snow
+  pool.addColorStop(0, '#ffd68a88'); pool.addColorStop(1, '#ffd68a00'); b.fillStyle = pool; b.fillRect(0, gy - 40, W, H);
+  const cone = b.createLinearGradient(0, ly, 0, gy);
+  cone.addColorStop(0, '#ffd27a33'); cone.addColorStop(1, '#ffd27a10');
+  b.fillStyle = cone; b.beginPath(); b.moveTo(lx - 10, ly); b.lineTo(lx + 10, ly); b.lineTo(lx + (gy - ly) * 0.45, gy); b.lineTo(lx - (gy - ly) * 0.45, gy); b.fill();
+  b.fillStyle = '#111521'; b.fillRect(lx - 4, ly, 8, gy - ly);                                  // the post
+  b.fillRect(lx - 18, ly - 14, 36, 8);
+  const head = b.createRadialGradient(lx, ly, 0, lx, ly, 80); head.addColorStop(0, '#fff3d0'); head.addColorStop(0.15, '#ffd27acc'); head.addColorStop(1, '#ffd27a00');
+  b.fillStyle = head; b.beginPath(); b.arc(lx, ly, 80, 0, 7); b.fill();
+}
+
+// ---------- the snow: every flake is computed on the GPU from its index alone ----------
+const cv = document.getElementById('gl');
+const gl = cv.getContext('webgl2', { premultipliedAlpha: false, alpha: true, antialias: false });
+if (!gl) document.getElementById('err').style.display = 'flex';
+const VS = `#version 300 es
+uniform float T; uniform vec2 R; uniform vec2 MOUSE; uniform float GUST; uniform float WIND; uniform vec2 LAMPP; uniform float DPR;
+out float vA; out vec3 vC; out float vS; out float vR;
+uint mix32(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float h(uint x) { return float(mix32(x)) / 4294967295.0; }   // integer hash: stays random for millions of flakes
+void main() {
+  uint id = uint(gl_VertexID) * 4u;
+  float s1 = h(id), s2 = h(id + 1u), s3 = h(id + 2u), s4 = h(id + 3u);
+  float z = 0.3 + 7.5 * sqrt(s3);                       // depth: most flakes far away, only a few right in front of you
+  float aspect = R.x / R.y;
+  float fall = mix(0.05, 0.13, s4) / z;                  // nearer flakes cross the screen faster (parallax)
+  float y = 1.15 - mod(s2 * 2.3 + T * fall, 2.3);
+  float x = s1 * 2.3 - 1.15 + 0.03 * sin(T * (0.4 + s4) + s2 * 40.0) / z + WIND * 0.25 / z;
+  x = mod(x + 1.15, 2.3) - 1.15;
+  // your cursor pushes the air: nearby flakes part around it, more during a gust
+  vec2 d = vec2((x - MOUSE.x) * aspect, y - MOUSE.y);
+  float r = 0.12 + 0.25 * GUST;
+  float push = exp(-dot(d, d) / (r * r)) * (0.06 + 0.25 * GUST) * smoothstep(5.0, 0.8, z);
+  vec2 off = normalize(d + 1e-5) * push;
+  x += off.x / aspect; y += off.y;
+  // inside the street lamp's cone the flakes light up warm
+  float dy = LAMPP.y - y;
+  float inCone = dy > 0.0 ? smoothstep(dy * 0.5 + 0.02, dy * 0.25, abs(x - LAMPP.x) * aspect) : smoothstep(0.12, 0.0, length(vec2((x - LAMPP.x) * aspect, dy)));
+  inCone *= exp(-pow((z - 2.2) / 1.6, 2.0));
+  vC = mix(vec3(0.75, 0.82, 1.0), vec3(1.0, 0.85, 0.55), inCone);
+  vA = (0.5 + 0.5 * inCone) * mix(1.0, 0.4, smoothstep(1.0, 7.0, z));
+  vS = clamp((7.0 / z) * (0.6 + 0.8 * s1), 1.0, 60.0) * DPR;
+  if (z < 0.45) vA *= 0.35;                              // the closest ones are out of focus
+  vR = s2;
+  gl_PointSize = vS;
+  gl_Position = vec4(x, y, 0.0, 1.0);
+}`;
+const FS = `#version 300 es
+precision mediump float;
+in float vA; in vec3 vC; in float vS; in float vR; out vec4 o;
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float r = length(p), a;
+  if (vS > 16.0) {                                       // big flakes show their six-armed crystal shape
+    float ang = atan(p.y, p.x) + vR * 6.28;
+    float arms = pow(abs(cos(ang * 3.0)), 18.0);
+    float branch = pow(abs(cos(ang * 9.0)), 30.0) * step(0.35, r) * step(r, 0.75);
+    a = smoothstep(0.08, 0.0, r - 0.92 * (0.12 + 0.88 * max(arms, branch * 0.7)));
+    a = max(a, smoothstep(0.25, 0.1, r));
+  } else a = smoothstep(1.0, 0.2, r);
+  o = vec4(vC, a * vA);
+}`;
+function compile(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+let prog, U = {};
+if (gl) {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog); gl.useProgram(prog);
+  for (const n of ['T', 'R', 'MOUSE', 'GUST', 'WIND', 'LAMPP', 'DPR']) U[n] = gl.getUniformLocation(prog, n);
+  gl.bindVertexArray(gl.createVertexArray());          // no vertex buffers at all: gl_VertexID is all a flake needs
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+}
+
+let count = 1000000, dpr = 1;
+function size() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr; if (gl) gl.viewport(0, 0, cv.width, cv.height);
+  paintBackground();
+}
+
+// ---------- controls ----------
+const bar = document.getElementById('bar');
+const COUNTS = [[10000, '10k'], [100000, '100k'], [300000, '300k'], [1000000, '1 million'], [3000000, '3 million']];
+COUNTS.forEach(([n, l]) => { const btn = document.createElement('button'); btn.textContent = l; btn.onclick = () => setCount(n); bar.appendChild(btn); });
+function setCount(n) { count = n; [...bar.children].forEach((x, i) => x.classList.toggle('on', COUNTS[i][0] === n)); }
+setCount(count);
+
+let mouse = { x: 9, y: 9 }, lastMX = null, windV = 0, wind = 0, gust = 0;
+cv.addEventListener('pointermove', e => {
+  mouse.x = e.clientX / innerWidth * 2 - 1; mouse.y = 1 - e.clientY / innerHeight * 2;
+  if (lastMX !== null) windV += (e.clientX - lastMX) * 0.0025;          // a sideways swipe becomes a breeze
+  lastMX = e.clientX;
+});
+cv.addEventListener('pointerleave', () => { mouse.x = mouse.y = 9; lastMX = null; });
+cv.addEventListener('pointerdown', e => { gust = 1; mouse.x = e.clientX / innerWidth * 2 - 1; mouse.y = 1 - e.clientY / innerHeight * 2; });
+
+let start = performance.now(), last = start, frames = 0, fpsT = start, fps = 60, lowFor = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  windV = windV * Math.pow(0.4, dt) + Math.sin(now / 4000) * 0.02 * dt;  // the breeze dies away to a gentle drift
+  wind += windV * dt * 6; gust *= Math.pow(0.15, dt);
+  frames++;
+  if (now - fpsT > 500) {
+    fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
+    if (fps < 28 && count > 100000) { if (++lowFor > 4) { setCount(COUNTS[COUNTS.findIndex(c => c[0] === count) - 1][0]); lowFor = 0; } } else lowFor = 0;
+  }
+  if (gl) {
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform1f(U.T, (now - start) / 1000); gl.uniform2f(U.R, cv.width, cv.height);
+    gl.uniform2f(U.MOUSE, mouse.x, mouse.y); gl.uniform1f(U.GUST, gust); gl.uniform1f(U.WIND, wind);
+    gl.uniform2f(U.LAMPP, LAMP.x * 2 - 1, 1 - LAMP.y * 2); gl.uniform1f(U.DPR, dpr);
+    gl.drawArrays(gl.POINTS, 0, count);
+  }
+  document.getElementById('stats').textContent = `${count.toLocaleString()} snowflakes · ${Math.round(fps)} fps · swipe sideways for wind, click for a gust`;
+  requestAnimationFrame(frame);
+}
+addEventListener('resize', size); size(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 13 · The Carol Machine</title>
+<style>
+  :root { --bg:#0e0b1c; --card:#17122b; --ink:#f3eeff; --dim:#9a90bd; --acc:#ffcf6e; }
+  html,body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  main { max-width:980px; margin:0 auto; padding:52px 16px 30px; display:flex; flex-direction:column; gap:14px; }
+  h1 { margin:0; text-align:center; font-family:Georgia,serif; font-weight:400; font-size:clamp(1.6rem,5vw,2.6rem); color:var(--acc); min-height:1.3em; }
+  .by { text-align:center; color:var(--dim); font-size:.9rem; margin-top:-8px; }
+  .card { background:var(--card); border-radius:14px; padding:12px; box-shadow:0 8px 30px #0006; }
+  #roll { width:100%; height:260px; display:block; border-radius:8px; background:#0a0815; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:center; }
+  button { background:#ffffff12; color:var(--ink); border:1px solid #ffffff22; border-radius:8px; padding:7px 12px; font:inherit; font-size:14px; cursor:pointer; }
+  button.on, #play { background:var(--acc); color:#1a1200; border-color:var(--acc); }
+  label { color:var(--dim); font-size:.9rem; display:flex; gap:6px; align-items:center; }
+  .brain { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:700px) { .brain { grid-template-columns:1fr; } }
+  .brain h2 { margin:0 0 8px; font-size:.78rem; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); font-weight:600; }
+  #ctx { font-family:ui-monospace,Consolas,monospace; font-size:1rem; margin-bottom:8px; min-height:1.4em; }
+  .cand { display:grid; grid-template-columns:70px 1fr 44px; gap:8px; align-items:center; font-family:ui-monospace,Consolas,monospace; font-size:.85rem; margin:3px 0; }
+  .cand .bar { height:12px; border-radius:6px; background:#ffffff14; overflow:hidden; }
+  .cand .bar i { display:block; height:100%; border-radius:6px; }
+  .cand.pick { color:var(--acc); font-weight:700; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; font-size:.82rem; color:var(--dim); }
+  .legend span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; background:var(--c); }
+  .stat { font-size:2rem; color:var(--acc); font-variant-numeric:tabular-nums; }
+  .note { color:var(--dim); font-size:.88rem; line-height:1.5; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<main>
+  <h1 id="title">The Carol Machine</h1>
+  <div class="by" id="by">Press play, and a machine will write a brand-new carol, one note at a time, forever.</div>
+  <div class="card"><canvas id="roll" width="1900" height="520"></canvas></div>
+  <div class="controls">
+    <button id="play">▶ Play</button>
+    <button id="newc">New carol</button>
+    <label>Memory <span id="orders"></span></label>
+    <label>Tempo <input id="tempo" type="range" min="70" max="180" value="112"></label>
+  </div>
+  <div class="brain">
+    <div class="card">
+      <h2>Inside the machine: what comes next?</h2>
+      <div id="ctx">—</div>
+      <div id="cands"></div>
+    </div>
+    <div class="card">
+      <h2>Where each note came from</h2>
+      <div class="legend" id="legend"></div>
+      <h2 style="margin-top:14px">Originality</h2>
+      <div><span class="stat" id="orig">–</span></div>
+      <div class="note">of the 5-note phrases in this carol appear in <i>none</i> of the songs it learned from. Shorter memory means more original but more aimless music, and longer memory means it starts quoting.</div>
+    </div>
+  </div>
+</main>
+<script>
+// ---------- training data: traditional, public-domain carols as "note:beats" ----------
+const SONGS = {
+  'Jingle Bells': 'E4:1 E4:1 E4:2 E4:1 E4:1 E4:2 E4:1 G4:1 C4:1.5 D4:.5 E4:4 F4:1 F4:1 F4:1.5 F4:.5 F4:1 E4:1 E4:1 E4:.5 E4:.5 E4:1 D4:1 D4:1 E4:1 D4:2 G4:2 E4:1 E4:1 E4:2 E4:1 E4:1 E4:2 E4:1 G4:1 C4:1.5 D4:.5 E4:4 F4:1 F4:1 F4:1.5 F4:.5 F4:1 E4:1 E4:1 E4:.5 E4:.5 G4:1 G4:1 F4:1 D4:1 C4:4 -:2',
+  'Deck the Halls': 'G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 D4:.5 E4:.5 F4:.5 D4:.5 E4:1.5 D4:.5 C4:1 B3:1 C4:2 G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 D4:.5 E4:.5 F4:.5 D4:.5 E4:1.5 D4:.5 C4:1 B3:1 C4:2 D4:1.5 E4:.5 F4:1 D4:1 E4:1.5 F4:.5 G4:1 D4:1 E4:.5 F4:.5 G4:1 A4:.5 B4:.5 C5:1 B4:1 A4:1 G4:2 G4:1.5 F4:.5 E4:1 D4:1 C4:1 D4:1 E4:1 C4:1 A4:.5 A4:.5 A4:.5 A4:.5 G4:1.5 F4:.5 E4:1 D4:1 C4:2 -:2',
+  'We Wish You a Merry Christmas': 'G4:1 C5:1 C5:.5 D5:.5 C5:.5 B4:.5 A4:1 A4:1 A4:1 D5:1 D5:.5 E5:.5 D5:.5 C5:.5 B4:1 G4:1 G4:1 E5:1 E5:.5 F5:.5 E5:.5 D5:.5 C5:1 A4:1 G4:.5 G4:.5 A4:1 D5:1 B4:1 C5:2 -:2',
+  'Silent Night': 'G4:1.5 A4:.5 G4:1 E4:3 G4:1.5 A4:.5 G4:1 E4:3 D5:2 D5:1 B4:3 C5:2 C5:1 G4:3 A4:2 A4:1 C5:1.5 B4:.5 A4:1 G4:1.5 A4:.5 G4:1 E4:3 A4:2 A4:1 C5:1.5 B4:.5 A4:1 G4:1.5 A4:.5 G4:1 E4:3 D5:2 D5:1 F5:1.5 D5:.5 B4:1 C5:3 E5:3 C5:1.5 G4:.5 E4:1 G4:1.5 F4:.5 D4:1 C4:6 -:2',
+  'Joy to the World': 'C5:1.5 B4:.5 A4:.75 G4:.25 F4:1.5 E4:.5 D4:1 C4:1.5 G4:.5 A4:1.5 A4:.5 B4:1.5 B4:.5 C5:3 C5:.5 C5:.5 B4:.5 A4:.5 G4:.5 G4:.75 F4:.25 E4:.5 C5:.5 C5:.5 B4:.5 A4:.5 G4:.5 G4:.75 F4:.25 E4:.5 E4:.5 E4:.5 E4:.5 E4:.5 E4:.25 F4:.25 G4:1.5 F4:.25 E4:.25 D4:.5 D4:.5 D4:.5 D4:.25 E4:.25 F4:1.5 E4:.25 D4:.25 C4:.5 C5:1 A4:.5 G4:.75 F4:.25 E4:.5 F4:.5 E4:1 D4:1 C4:2 -:2',
+};
+const COLORS = { 'Jingle Bells': '#ff5d6c', 'Deck the Halls': '#52d78a', 'We Wish You a Merry Christmas': '#5ab0ff', 'Silent Night': '#c99bff', 'Joy to the World': '#ffcf6e' };
+const SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const midi = n => SEMI[n[0]] + 12 * (+n[1] + 1);
+const freqOf = m => 440 * 2 ** ((m - 69) / 12);
+
+// ---------- the model: a Markov chain over (pitch, duration) tokens ----------
+// models[k] maps "the last k tokens" → { next token → set of songs where that happened }
+const MAXK = 3, models = Array.from({ length: MAXK + 1 }, () => new Map());
+const allTokens = {};
+for (const [name, src] of Object.entries(SONGS)) {
+  const toks = src.split(/\s+/); allTokens[name] = toks;
+  for (let i = 0; i < toks.length; i++)
+    for (let k = 0; k <= MAXK && k <= i; k++) {
+      const ctx = toks.slice(i - k, i).join(' ');
+      if (!models[k].has(ctx)) models[k].set(ctx, new Map());
+      const m = models[k].get(ctx);
+      if (!m.has(toks[i])) m.set(toks[i], []);
+      m.get(toks[i]).push(name);
+    }
+}
+const phrases = new Set();                 // every 5-token phrase in the training songs, to measure originality
+for (const toks of Object.values(allTokens)) for (let i = 0; i + 5 <= toks.length; i++) phrases.add(toks.slice(i, i + 5).join(' '));
+
+let order = 2, history = [], beatsSinceCadence = 0;
+function nextToken() {
+  for (let k = Math.min(order, history.length); k >= 0; k--) {        // back off to shorter memory if this context was never seen
+    const ctx = history.slice(history.length - k).join(' ');
+    const m = models[k].get(ctx); if (!m) continue;
+    let cands = [...m.entries()].map(([tok, srcs]) => ({ tok, w: srcs.length, srcs }));
+    if (beatsSinceCadence > 28)                                        // after a while, lean towards a long note on the home key
+      cands.forEach(c => { const [n, b] = c.tok.split(':'); if (n[0] === 'C' && +b >= 2) c.w *= 6; });
+    const total = cands.reduce((s, c) => s + c.w, 0);
+    cands.forEach(c => c.p = c.w / total);
+    cands.sort((a, b) => b.p - a.p);
+    let r = Math.random(), pick = cands[cands.length - 1];
+    for (const c of cands) { r -= c.p; if (r <= 0) { pick = c; break; } }
+    return { k, ctx, cands, pick, src: pick.srcs[(Math.random() * pick.srcs.length) | 0] };
+  }
+}
+
+// ---------- titles ----------
+const ADJ = ['Silver', 'Midnight', 'Frosty', 'Golden', 'Gentle', 'Merry', 'Starlit', 'Snowy', 'Holly', 'Candlelit', 'Wandering', 'Quiet'];
+const NOUN = ['Bells', 'Candle', 'Star', 'Sleigh', 'Fir Tree', 'Lantern', 'Snowfall', 'Hearth', 'Robin', 'Carollers', 'Pine', 'Morning'];
+const END = ['on the Hill', 'in the Snow', 'at Midnight', 'of the North', 'by the Fire', 'over the Village', 'of Winter'];
+const pickOne = a => a[(Math.random() * a.length) | 0];
+function newTitle() {
+  const t = [() => `The ${pickOne(ADJ)} ${pickOne(NOUN)} ${pickOne(END)}`, () => `O ${pickOne(ADJ)} ${pickOne(NOUN)}`, () => `${pickOne(ADJ)} ${pickOne(NOUN)}, ${pickOne(ADJ)} ${pickOne(NOUN)}`][(Math.random() * 3) | 0]();
+  document.getElementById('title').textContent = t;
+  document.getElementById('by').textContent = `A carol nobody has ever heard before · composed live with a ${order}-note memory`;
+}
+
+// ---------- sound: a lookahead scheduler so timing stays tight ----------
+let ac, master, playing = false, nextTime = 0, notes = [], chord = 0;
+const CHORDS = [[0, 4, 7, 'C'], [5, 9, 0, 'F'], [7, 11, 2, 'G'], [9, 0, 4, 'Am'], [2, 5, 9, 'Dm']];
+function audio() {
+  if (ac) return ac.resume();
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  master = ac.createGain(); master.gain.value = 0.6;
+  const verb = ac.createConvolver(), len = ac.sampleRate * 2.2, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2.5; }
+  verb.buffer = ir; const wet = ac.createGain(); wet.gain.value = 0.3;
+  master.connect(ac.destination); master.connect(verb).connect(wet).connect(ac.destination);
+}
+function voice(f, t, len, vol, type) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.value = f;
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+  o.connect(g).connect(master); o.start(t); o.stop(t + len + 0.05);
+}
+function harmonise(m) {     // pick a chord containing the melody note, preferring the one we're on
+  const pc = m % 12;
+  if (CHORDS[chord].slice(0, 3).includes(pc)) return chord;
+  const opts = CHORDS.map((c, i) => i).filter(i => CHORDS[i].slice(0, 3).includes(pc));
+  return opts.length ? opts[(Math.random() * Math.min(2, opts.length)) | 0] : chord;
+}
+function schedule() {
+  if (!playing) return;
+  const spb = 60 / +document.getElementById('tempo').value;
+  while (nextTime < ac.currentTime + 0.15) {
+    const d = nextToken(), [n, b] = d.pick.tok.split(':'), beats = +b;
+    history.push(d.pick.tok); if (history.length > 400) history.shift();
+    beatsSinceCadence += beats; if (n[0] === 'C' && beats >= 2) beatsSinceCadence = 0;
+    const dur = beats * spb;
+    if (n !== '-') {
+      const m = midi(n);
+      voice(freqOf(m), nextTime, Math.max(0.5, dur * 1.6), 0.22, 'sine');
+      voice(freqOf(m) * 2, nextTime, 0.4, 0.05, 'triangle');
+      const c = harmonise(m);
+      if (c !== chord || beats >= 1) {
+        chord = c; const [r, , , ] = CHORDS[c];
+        voice(freqOf(36 + r + (r > 6 ? 0 : 12)), nextTime, dur * 1.1 + 0.2, 0.16, 'triangle');     // bass
+        for (const pc of CHORDS[c].slice(0, 3)) voice(freqOf(60 + pc - (pc > 7 ? 12 : 0)), nextTime, dur + 0.3, 0.025, 'sawtooth'); // soft pad
+      }
+      notes.push({ m, time: nextTime, dur, src: d.src, d, tok: d.pick.tok });
+    } else notes.push({ m: null, time: nextTime, dur, src: d.src, d, tok: d.pick.tok });
+    nextTime += dur;
+  }
+  notes = notes.filter(x => x.time + x.dur > ac.currentTime - 8);
+  setTimeout(schedule, 25);
+}
+
+// ---------- drawing ----------
+const roll = document.getElementById('roll'), g = roll.getContext('2d');
+const LO = 54, HI = 80;
+let shown = null;
+function draw() {
+  const Wc = roll.width, Hc = roll.height, now = ac ? ac.currentTime : 0, px = 170, headX = Wc * 0.3;
+  g.clearRect(0, 0, Wc, Hc);
+  for (let m = LO; m <= HI; m++) {                        // staff-ish lines on the C-major notes
+    if (![0, 2, 4, 5, 7, 9, 11].includes(m % 12)) continue;
+    const y = Hc - (m - LO) / (HI - LO) * (Hc - 20) - 10;
+    g.fillStyle = m % 12 === 0 ? '#ffffff22' : '#ffffff0a'; g.fillRect(0, y, Wc, 1);
+    if (m % 12 === 0) { g.fillStyle = '#ffffff55'; g.font = '28px system-ui'; g.fillText('C' + (m / 12 - 1), 8, y - 4); }
+  }
+  for (const x of notes) {
+    if (x.m === null) continue;
+    const X = headX + (x.time - now) * px, w = x.dur * px - 4, y = Hc - (x.m - LO) / (HI - LO) * (Hc - 20) - 10;
+    if (X > Wc || X + w < 0) continue;
+    const active = now >= x.time && now < x.time + x.dur;
+    g.fillStyle = COLORS[x.src]; g.globalAlpha = x.time > now ? 0.45 : active ? 1 : 0.8;
+    if (active) { g.shadowColor = COLORS[x.src]; g.shadowBlur = 24; }
+    g.beginPath(); g.roundRect(X, y - 14, Math.max(8, w), 28, 10); g.fill();
+    g.shadowBlur = 0; g.globalAlpha = 1;
+    if (active && shown !== x) { shown = x; showDecision(x.d); }
+  }
+  g.fillStyle = '#ffcf6e'; g.fillRect(headX - 1, 0, 3, Hc);
+  requestAnimationFrame(draw);
+}
+function showDecision(d) {
+  const pretty = t => { const [n, b] = t.split(':'); const len = ({ '.25': '¼', '.5': '½', '.75': '¾', '1': '1', '1.5': '1½' })[b] || b; return n === '-' ? `rest ${len}` : `${n} ♩${len}`; };
+  document.getElementById('ctx').textContent = d.k ? `After  ${d.ctx.split(' ').map(pretty).join(' · ')}` : 'No memory: picking from every note it knows';
+  document.getElementById('cands').innerHTML = d.cands.slice(0, 6).map(c => {
+    const col = COLORS[c.srcs[0]];
+    return `<div class="cand${c === d.pick ? ' pick' : ''}"><span>${pretty(c.tok)}</span><span class="bar"><i style="width:${(c.p * 100).toFixed(0)}%;background:${col}"></i></span><span>${(c.p * 100).toFixed(0)}%</span></div>`;
+  }).join('') + (d.cands.length > 6 ? `<div class="note">…and ${d.cands.length - 6} more options</div>` : '');
+  // originality over the carol so far
+  let fresh = 0, tot = 0;
+  for (let i = 0; i + 5 <= history.length; i++) { tot++; if (!phrases.has(history.slice(i, i + 5).join(' '))) fresh++; }
+  document.getElementById('orig').textContent = tot ? `${Math.round(fresh / tot * 100)}%` : '–';
+}
+
+// ---------- UI ----------
+document.getElementById('legend').innerHTML = Object.entries(COLORS).map(([n, c]) => `<span style="--c:${c}">${n}</span>`).join('');
+const ord = document.getElementById('orders');
+[[1, '1 note'], [2, '2 notes'], [3, '3 notes']].forEach(([k, l]) => {
+  const b = document.createElement('button'); b.textContent = l; b.onclick = () => { order = k; [...ord.children].forEach(x => x.classList.toggle('on', x === b)); newTitle(); };
+  if (k === order) b.classList.add('on'); ord.appendChild(b);
+});
+function fresh() { history = []; beatsSinceCadence = 0; notes = []; if (ac) nextTime = ac.currentTime + 0.1; newTitle(); }
+document.getElementById('play').onclick = e => {
+  audio(); playing = !playing; e.target.textContent = playing ? '❚❚ Pause' : '▶ Play';
+  if (playing) { if (!history.length) newTitle(); nextTime = Math.max(nextTime, ac.currentTime + 0.1); schedule(); }
+};
+document.getElementById('newc').onclick = fresh;
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

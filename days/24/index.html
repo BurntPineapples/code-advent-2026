@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 24 · Gingerbread Gait</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#0d0f24; font-family:system-ui,sans-serif; color:#fff3e2; user-select:none; }
+  #c { display:block; width:100vw; height:100vh; }
+  .back { position:fixed; top:12px; left:12px; z-index:3; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  #hud { position:fixed; top:10px; left:50%; transform:translateX(-50%); text-align:center; pointer-events:none; z-index:2; width:max-content; max-width:92vw; }
+  #title { font-family:Georgia,serif; font-size:clamp(1.2rem,3.4vw,1.9rem); color:#ffcf8a; text-shadow:0 0 18px #ff9a3c55; }
+  #stats { font-size:13px; color:#ffe9cccc; margin-top:4px; font-variant-numeric:tabular-nums; }
+  #stats b { color:#fff; }
+  #msg { font-size:14px; margin-top:5px; color:#ffe1a8; min-height:1.2em; text-shadow:0 1px 4px #000; }
+  #chart { position:fixed; right:14px; top:60px; width:240px; height:110px; background:#0009; border:1px solid #ffffff1f; border-radius:10px; z-index:2; }
+  #fame { position:fixed; left:14px; top:60px; z-index:2; display:flex; flex-direction:column; gap:6px; }
+  #fame div { background:#0009; border:1px solid #ffffff1f; border-radius:8px; font-size:11px; color:#ffe9cc; text-align:center; padding:2px 4px 4px; }
+  #fame canvas { display:block; width:92px; height:56px; }
+  .bar { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:center; align-items:center; width:max-content; max-width:94vw; }
+  .bar > * { background:#000b; color:#fff3e2; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; }
+  .bar button { cursor:pointer; }
+  .bar button.on { background:#ffcf8a; color:#2a1400; }
+  @media (max-width:700px) { #fame { display:none; } #chart { top:auto; bottom:64px; width:180px; height:80px; } }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div id="hud"><div id="title">Gingerbread Gait</div><div id="stats"></div><div id="msg"></div></div>
+<canvas id="c"></canvas>
+<canvas id="chart"></canvas>
+<div id="fame"></div>
+<div class="bar">
+  <button id="pause">❚❚ Pause</button>
+  <button id="turbo">⏩ Turbo evolve</button>
+  <button id="crowd" class="on">👥 Top 10</button>
+  <select id="speed"><option value="1">1× replay</option><option value="2" selected>2× replay</option><option value="4">4× replay</option></select>
+  <button id="reset">🍪 New batch</button>
+</div>
+<script>
+// Gingerbread creatures made of gumdrops (masses) and icing bars (springs). Some bars
+// are muscles that stretch and shrink on a rhythm. Nobody tells them how to walk:
+// a genetic algorithm breeds whoever got furthest, and walking emerges.
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');
+const chart = document.getElementById('chart'), cctx = chart.getContext('2d');
+const $ = id => document.getElementById(id);
+let W, H, DPR;
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const r = chart.getBoundingClientRect(); chart.width = r.width * DPR; chart.height = r.height * DPR; cctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+size(); addEventListener('resize', size);
+
+// ---------- genome ----------
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function connected(n, muscles) {
+  const adj = Array.from({ length: n }, () => []);
+  for (const m of muscles) { adj[m.a].push(m.b); adj[m.b].push(m.a); }
+  const seen = new Set([0]), st = [0];
+  while (st.length) for (const j of adj[st.pop()]) if (!seen.has(j)) { seen.add(j); st.push(j); }
+  return seen.size === n;
+}
+const hasEdge = (g, a, b) => g.muscles.some(m => (m.a === a && m.b === b) || (m.a === b && m.b === a));
+function newMuscle(a, b) { return { a, b, amp: Math.random() < 0.3 ? 0 : rnd(0.05, 0.35), phase: Math.random() }; }
+function randomGenome() {
+  const n = 3 + ((Math.random() * 4) | 0);
+  const g = { nodes: [], muscles: [], period: rnd(0.6, 1.8) };
+  for (let i = 0; i < n; i++) g.nodes.push({ x: rnd(-0.55, 0.55), y: rnd(0.08, 1.0), f: Math.random() });
+  for (let i = 1; i < n; i++) g.muscles.push(newMuscle(i, (Math.random() * i) | 0));
+  const extra = (Math.random() * n) | 0;
+  for (let k = 0; k < extra; k++) { const a = (Math.random() * n) | 0, b = (Math.random() * n) | 0; if (a !== b && !hasEdge(g, a, b)) g.muscles.push(newMuscle(a, b)); }
+  return g;
+}
+const copy = g => ({ nodes: g.nodes.map(o => ({ ...o })), muscles: g.muscles.map(m => ({ ...m })), period: g.period });
+function mutate(p) {
+  const g = copy(p), r = Math.random;
+  for (const nd of g.nodes) {
+    if (r() < 0.25) { nd.x = clamp(nd.x + rnd(-0.1, 0.1), -0.8, 0.8); nd.y = clamp(nd.y + rnd(-0.1, 0.1), 0.05, 1.3); }
+    if (r() < 0.2) nd.f = clamp(nd.f + rnd(-0.2, 0.2), 0, 1);
+  }
+  for (const m of g.muscles) {
+    if (r() < 0.25) m.amp = clamp(m.amp + rnd(-0.07, 0.07), 0, 0.4);
+    if (r() < 0.25) m.phase = (m.phase + rnd(-0.12, 0.12) + 1) % 1;
+  }
+  if (r() < 0.25) g.period = clamp(g.period * rnd(0.88, 1.12), 0.4, 2.4);
+  // rarer structural changes: grow or lose a gumdrop or a bar
+  const n = g.nodes.length;
+  if (r() < 0.06 && n < 8) {
+    const a = (r() * n) | 0, b = (r() * n) | 0;
+    g.nodes.push({ x: clamp(g.nodes[a].x + rnd(-0.3, 0.3), -0.8, 0.8), y: clamp(g.nodes[a].y + rnd(-0.3, 0.3), 0.05, 1.3), f: r() });
+    g.muscles.push(newMuscle(n, a)); if (b !== a) g.muscles.push(newMuscle(n, b));
+  }
+  if (r() < 0.05 && g.nodes.length > 3) {
+    const k = (r() * g.nodes.length) | 0;
+    const ms = g.muscles.filter(m => m.a !== k && m.b !== k).map(m => ({ ...m, a: m.a > k ? m.a - 1 : m.a, b: m.b > k ? m.b - 1 : m.b }));
+    if (connected(g.nodes.length - 1, ms)) { g.nodes.splice(k, 1); g.muscles = ms; }
+  }
+  if (r() < 0.1) { const a = (r() * g.nodes.length) | 0, b = (r() * g.nodes.length) | 0; if (a !== b && !hasEdge(g, a, b)) g.muscles.push(newMuscle(a, b)); }
+  if (r() < 0.08 && g.muscles.length > g.nodes.length - 1) {
+    const k = (r() * g.muscles.length) | 0, ms = g.muscles.filter((_, i) => i !== k);
+    if (connected(g.nodes.length, ms)) g.muscles = ms;
+  }
+  return g;
+}
+
+// ---------- physics: position-based dynamics ----------
+// Each gumdrop remembers where it was last step (Verlet), so velocity is implicit.
+// Bars are distance constraints, nudged back to length a few times per step.
+// A muscle's target length is rest × (1 + amp·sin(2π(t/period + phase))).
+const G = 9.8, SUB = 3, DT = 1 / 60, h = DT / SUB, ITER = 4, TEST = 12, VMAX = 3;
+function body(g) {
+  const n = g.nodes.length, minY = Math.min(...g.nodes.map(o => o.y));
+  const b = { g, n, t: 0, px: new Float64Array(n), py: new Float64Array(n), ox: new Float64Array(n), oy: new Float64Array(n), rest: [], grip: [] };
+  g.nodes.forEach((o, i) => { b.px[i] = b.ox[i] = o.x; b.py[i] = b.oy[i] = o.y - minY + 0.02; b.grip[i] = 0.05 + 0.9 * o.f; });
+  b.rest = g.muscles.map(m => Math.hypot(g.nodes[m.a].x - g.nodes[m.b].x, g.nodes[m.a].y - g.nodes[m.b].y) || 0.05);
+  b.x0 = centre(b);
+  return b;
+}
+function centre(b) { let s = 0; for (let i = 0; i < b.n; i++) s += b.px[i]; return s / b.n; }
+function tick(b) {
+  const { n, px, py, ox, oy, g } = b;
+  for (let s = 0; s < SUB; s++) {
+    b.t += h;
+    const amp = Math.min(1, b.t);                          // muscles warm up over the first second
+    for (let i = 0; i < n; i++) {
+      let vx = (px[i] - ox[i]) * 0.998, vy = (py[i] - oy[i]) * 0.998;
+      // Speed limit. Stiff constraints fighting the ground can pump in energy
+      // (cookies learned to launch themselves 18 m up), so cap each gumdrop at VMAX.
+      const sp = Math.hypot(vx, vy);
+      if (sp > VMAX * h) { vx *= VMAX * h / sp; vy *= VMAX * h / sp; }
+      ox[i] = px[i]; oy[i] = py[i];
+      px[i] += vx; py[i] += vy - G * h * h;
+    }
+    for (let it = 0; it < ITER; it++) {
+      for (let k = 0; k < g.muscles.length; k++) {
+        const m = g.muscles[k];
+        const L = b.rest[k] * (1 + amp * m.amp * Math.sin(6.2832 * (b.t / g.period + m.phase)));
+        const dx = px[m.b] - px[m.a], dy = py[m.b] - py[m.a], d = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+        const c = (d - L) / d * 0.5 * 0.9;
+        px[m.a] += dx * c; py[m.a] += dy * c; px[m.b] -= dx * c; py[m.b] -= dy * c;
+      }
+      for (let i = 0; i < n; i++) if (py[i] < 0) py[i] = 0;
+    }
+    // Ground: no bounce, and friction holds a touching gumdrop in place.
+    // Sticky and slippery feet are what let a wiggle turn into a walk.
+    for (let i = 0; i < n; i++) if (py[i] <= 1e-4) { oy[i] = py[i]; px[i] = ox[i] + (px[i] - ox[i]) * (1 - b.grip[i]); }
+  }
+}
+function evaluate(g) {
+  const b = body(g);
+  for (let f = 0; f < TEST * 60; f++) tick(b);
+  const d = centre(b) - b.x0;
+  return Number.isFinite(d) ? d : -99;
+}
+
+// ---------- genetic algorithm ----------
+const POP = 80, ELITE = 4;
+let pop = [], gen = 0, bestEver = null, hist = [], fame = [];
+function evalPop() {
+  for (const c of pop) if (c.fit === undefined) c.fit = evaluate(c.g);
+  rank();
+}
+function rank() {
+  pop.sort((a, b) => b.fit - a.fit);
+  const best = pop[0].fit, med = pop[POP >> 1].fit;
+  hist.push([best, med]);
+  if (!bestEver || best > bestEver.fit + 1e-9) {
+    const big = !bestEver || best > bestEver.fit + 0.5 || fame.length === 0;
+    bestEver = { g: copy(pop[0].g), fit: best, gen };
+    if (big) addFame(bestEver);
+  }
+}
+// The next generation is bred right away and tested a few cookies per frame in the
+// background, so the replay never stutters.
+let next = null;
+function prepareNext() {
+  const pick = () => { let w = pop[(Math.random() * POP) | 0]; for (let k = 0; k < 2; k++) { const c = pop[(Math.random() * POP) | 0]; if (c.fit > w.fit) w = c; } return w; };
+  next = pop.slice(0, ELITE).map(c => ({ g: c.g, fit: c.fit }));               // the best few survive unchanged
+  while (next.length < POP - 6) next.push({ g: mutate(pick().g) });            // tournament winners, mutated
+  while (next.length < POP) next.push({ g: randomGenome() });                   // a few newcomers keep ideas fresh
+}
+function evalSome(ms) {
+  const t0 = performance.now();
+  for (const c of next) if (c.fit === undefined) { c.fit = evaluate(c.g); if (performance.now() - t0 > ms) return false; }
+  return true;
+}
+function adoptNext() { pop = next; gen++; rank(); prepareNext(); }
+function breed() { evalSome(Infinity); adoptNext(); }
+function start() {
+  pop = Array.from({ length: POP }, () => ({ g: randomGenome() }));
+  gen = 0; hist = []; bestEver = null; fame = []; $('fame').innerHTML = '';
+  evalPop(); prepareNext(); showGeneration();
+}
+
+// ---------- the stage ----------
+let stage = [], replayT = 0, paused = false, turbo = false, crowd = true, camX = 0, recordX = 0;
+function showGeneration() {
+  const n = crowd ? 10 : 1;
+  stage = pop.slice(0, n).map((c, i) => ({ b: body(c.g), fit: c.fit, rank: i }));
+  replayT = 0; camX = 0;
+  recordX = bestEver.fit;
+  stats();
+  say(gen === 0 ? 'Generation 0: 80 random gingerbread blobs. Most just flop. The best 10 are shown, and the leader wears a face.'
+      : `Generation ${gen}: the leader went ${pop[0].fit.toFixed(2)} m.${pop[0].fit >= bestEver.fit - 1e-9 && gen ? ' A new record!' : ''}`);
+}
+function stats() {
+  $('stats').innerHTML = `Generation <b>${gen}</b> · This gen's best: <b>${pop[0].fit.toFixed(2)} m</b> · Record: <b>${bestEver.fit.toFixed(2)} m</b> (gen ${bestEver.gen}) · ${POP} cookies per batch`;
+}
+function say(s) { $('msg').textContent = s; }
+
+const sky = (() => { const s = []; for (let i = 0; i < 140; i++) s.push([Math.random(), Math.random() * 0.6, Math.random() * 1.4 + 0.3]); return s; })();
+function drawWorld(sc, gy) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b0d22'); g.addColorStop(0.6, '#1c2050'); g.addColorStop(1, '#2b2460');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  for (const [x, y, r] of sky) { ctx.globalAlpha = 0.3 + r * 0.3; ctx.fillRect(((x * W - camX * sc * 0.05) % W + W) % W, y * H, r, r); }
+  ctx.globalAlpha = 1;
+  // far hills with gingerbread houses, scrolling slowly for depth
+  ctx.fillStyle = '#161a40';
+  ctx.beginPath(); ctx.moveTo(0, gy);
+  for (let x = 0; x <= W; x += 16) { const wx = x + camX * sc * 0.3; ctx.lineTo(x, gy - 70 - Math.sin(wx * 0.004) * 30 - Math.sin(wx * 0.011) * 12); }
+  ctx.lineTo(W, gy); ctx.fill();
+  for (let k = -1; k < W / 260 + 2; k++) {
+    const wx = Math.floor(camX * sc * 0.3 / 260) + k, x = wx * 260 - camX * sc * 0.3 + 60;
+    const hy = gy - 70 - Math.sin((x + camX * sc * 0.3) * 0.004) * 30 - Math.sin((x + camX * sc * 0.3) * 0.011) * 12;
+    ctx.fillStyle = '#3a2416'; ctx.fillRect(x, hy - 22, 30, 24);
+    ctx.fillStyle = '#e8eefc'; ctx.beginPath(); ctx.moveTo(x - 5, hy - 20); ctx.lineTo(x + 15, hy - 38); ctx.lineTo(x + 35, hy - 20); ctx.fill();
+    ctx.fillStyle = '#ffcf6b'; ctx.fillRect(x + 11, hy - 14, 8, 8);
+  }
+  // snowy ground
+  ctx.fillStyle = '#dfe8ff'; ctx.fillRect(0, gy, W, H - gy);
+  ctx.fillStyle = '#c4d2f4'; ctx.fillRect(0, gy + 6, W, H - gy);
+  // candy-cane distance posts every metre
+  const m0 = Math.floor(camX - W / 2 / sc) - 1, m1 = Math.ceil(camX + W / 2 / sc) + 1;
+  ctx.font = '600 12px system-ui'; ctx.textAlign = 'center';
+  for (let m = m0; m <= m1; m++) {
+    const x = W / 2 + (m - camX) * sc, big = m % 5 === 0, ph = (big ? 0.55 : 0.32) * sc;
+    ctx.lineWidth = big ? 6 : 4; ctx.lineCap = 'round';
+    ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x, gy - ph); ctx.arc(x + ph * 0.18, gy - ph, ph * 0.18, Math.PI, 0); ctx.stroke();
+    ctx.strokeStyle = '#d62a3a'; ctx.setLineDash([5, 5]); ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x, gy - ph); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = m === 0 ? '#ffcf6b' : '#5b6aa0'; ctx.fillText(m === 0 ? 'START' : m + ' m', x, gy + 22);
+  }
+  // the record flag
+  const rx = W / 2 + (recordX - camX) * sc;
+  ctx.strokeStyle = '#ffcf6b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(rx, gy); ctx.lineTo(rx, gy - sc * 1.3); ctx.stroke();
+  ctx.fillStyle = '#ffcf6b'; ctx.beginPath(); ctx.moveTo(rx, gy - sc * 1.3); ctx.lineTo(rx + 30, gy - sc * 1.2); ctx.lineTo(rx, gy - sc * 1.1); ctx.fill();
+  ctx.fillText('record', rx + 18, gy - sc * 1.33);
+}
+
+function drawCreature(b, sc, gy, ox, alpha, face) {
+  const X = i => ox + b.px[i] * sc, Y = i => gy - b.py[i] * sc, g = b.g;
+  ctx.globalAlpha = alpha;
+  // fill every triangle of bars with gingerbread
+  const tri = [];
+  for (let i = 0; i < b.n; i++) for (let j = i + 1; j < b.n; j++) if (hasEdge(g, i, j)) for (let k = j + 1; k < b.n; k++) if (hasEdge(g, j, k) && hasEdge(g, i, k)) tri.push([i, j, k]);
+  ctx.fillStyle = '#b8743a';
+  for (const [i, j, k] of tri) { ctx.beginPath(); ctx.moveTo(X(i), Y(i)); ctx.lineTo(X(j), Y(j)); ctx.lineTo(X(k), Y(k)); ctx.fill(); }
+  ctx.lineCap = 'round';
+  g.muscles.forEach((m, k) => {
+    ctx.strokeStyle = '#8f5424'; ctx.lineWidth = Math.max(3, sc * 0.12);
+    ctx.beginPath(); ctx.moveTo(X(m.a), Y(m.a)); ctx.lineTo(X(m.b), Y(m.b)); ctx.stroke();
+    ctx.strokeStyle = '#c7843f'; ctx.lineWidth = Math.max(2, sc * 0.085); ctx.stroke();
+    // icing: muscles get a wiggly pink-white line that thickens as they squeeze
+    const act = m.amp ? Math.sin(6.2832 * (b.t / g.period + m.phase)) : 0;
+    ctx.strokeStyle = m.amp ? (act < 0 ? '#ffd0e0' : '#fffaf4') : '#fffaf4';
+    ctx.lineWidth = Math.max(1, sc * (0.018 + (m.amp ? (0.5 - act * 0.5) * 0.02 : 0)));
+    ctx.setLineDash(m.amp ? [sc * 0.05, sc * 0.035] : []);
+    ctx.stroke(); ctx.setLineDash([]);
+  });
+  for (let i = 0; i < b.n; i++) {
+    const r = Math.max(4, sc * 0.065), f = g.nodes[i].f;
+    ctx.fillStyle = `hsl(${f > 0.5 ? 350 : 150},${40 + Math.abs(f - 0.5) * 100}%,${55}%)`;
+    ctx.beginPath(); ctx.arc(X(i), Y(i), r, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffffff99'; ctx.beginPath(); ctx.arc(X(i) - r * 0.35, Y(i) - r * 0.35, r * 0.3, 0, 7); ctx.fill();
+  }
+  if (face) {
+    let top = 0; for (let i = 1; i < b.n; i++) if (b.py[i] > b.py[top]) top = i;
+    const x = X(top), y = Y(top) - sc * 0.13, e = Math.max(2, sc * 0.022);
+    ctx.fillStyle = '#c7843f'; ctx.beginPath(); ctx.arc(x, y, sc * 0.11, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x - sc * 0.04, y - sc * 0.02, e, 0, 7); ctx.arc(x + sc * 0.04, y - sc * 0.02, e, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(1.5, sc * 0.012); ctx.beginPath(); ctx.arc(x, y + sc * 0.01, sc * 0.045, 0.3, Math.PI - 0.3); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function addFame(rec) {
+  fame.push(rec);
+  const d = document.createElement('div'), c = document.createElement('canvas');
+  c.width = 184; c.height = 112;
+  const x = c.getContext('2d'), b = body(rec.g);
+  const save = ctx;
+  // draw the creature's resting shape, small
+  const xs = rec.g.nodes.map(o => o.x), ys = rec.g.nodes.map(o => o.y);
+  const s = Math.min(150 / (Math.max(...xs) - Math.min(...xs) + 0.3), 80 / (Math.max(...ys) - Math.min(...ys) + 0.3));
+  ctxSet(x); drawCreature(b, s, 100, 92 - ((Math.max(...xs) + Math.min(...xs)) / 2) * s, 1, true); ctxSet(save);
+  d.appendChild(c); d.appendChild(document.createTextNode(`gen ${rec.gen} · ${rec.fit.toFixed(1)} m`));
+  const f = $('fame'); f.appendChild(d);
+  while (f.children.length > 6) f.firstChild.remove();
+}
+function ctxSet(c) { ctx = c; }
+
+function drawChart() {
+  const r = chart.getBoundingClientRect(), w = r.width, hh = r.height, pad = 8;
+  cctx.clearRect(0, 0, w, hh);
+  if (hist.length < 2) return;
+  const hi = Math.max(1, ...hist.map(v => v[0])), lo = Math.min(0, ...hist.map(v => v[1]));
+  const X = i => pad + i / (hist.length - 1) * (w - pad * 2), Y = v => hh - pad - (v - lo) / (hi - lo) * (hh - pad * 2 - 12);
+  cctx.lineWidth = 1.5;
+  [[1, '#c7843f'], [0, '#ffcf6b']].forEach(([k, col]) => {
+    cctx.strokeStyle = col; cctx.beginPath();
+    hist.forEach((v, i) => i ? cctx.lineTo(X(i), Y(v[k])) : cctx.moveTo(X(i), Y(v[k]))); cctx.stroke();
+  });
+  cctx.font = '10px system-ui'; cctx.fillStyle = '#ffcf6b'; cctx.fillText('best', pad, 12);
+  cctx.fillStyle = '#c7843f'; cctx.fillText('median', pad + 30, 12);
+  cctx.fillStyle = '#ffe9cc99'; cctx.textAlign = 'right'; cctx.fillText(hi.toFixed(1) + ' m', w - pad, 12); cctx.textAlign = 'left';
+}
+
+// ---------- loop ----------
+let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  const ready = !paused && evalSome(turbo ? 22 : 6);
+  if (turbo && !paused) {
+    if (ready) adoptNext();
+    stats(); say(`Turbo: breeding as fast as possible… generation ${gen}. Press ⏩ again to watch.`);
+    if (!stage.length || stage[0].fit < bestEver.fit - 1e-9 || stage[0].b.t > TEST) {        // keep showing the record-holder
+      stage = [{ b: body(bestEver.g), fit: bestEver.fit, rank: 0 }]; recordX = bestEver.fit;
+    }
+  }
+  if (!paused) {
+    acc += dt * +$('speed').value;
+    while (acc >= DT) { acc -= DT; for (const s of stage) if (s.b.t < TEST) tick(s.b); }
+    const lead = stage[0];
+    if (lead) camX += (centre(lead.b) - camX) * Math.min(1, dt * 3);
+    if (!turbo && lead && lead.b.t >= TEST) {
+      replayT += dt;
+      if (replayT > 0.8 && ready) { adoptNext(); showGeneration(); }
+    }
+  }
+  const sc = Math.min(W, H * 1.4) / 4.2, gy = H * 0.74;
+  drawWorld(sc, gy);
+  for (let i = stage.length - 1; i >= 0; i--) {
+    const s = stage[i];
+    drawCreature(s.b, sc, gy, W / 2 - camX * sc, i === 0 ? 1 : 0.28, i === 0);
+  }
+  if (stage[0]) {
+    const d = centre(stage[0].b) - stage[0].b.x0;
+    ctx.font = '600 15px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = '#2a2a5a';
+    ctx.fillText(`${d.toFixed(2)} m   ·   ${Math.min(TEST, stage[0].b.t).toFixed(1)} / ${TEST} s`, W / 2, gy + 48);
+  }
+  drawChart();
+  requestAnimationFrame(frame);
+}
+
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? '▶ Play' : '❚❚ Pause'; $('pause').classList.toggle('on', paused); };
+$('turbo').onclick = () => { turbo = !turbo; $('turbo').classList.toggle('on', turbo); if (!turbo) showGeneration(); };
+$('crowd').onclick = () => { crowd = !crowd; $('crowd').classList.toggle('on', crowd); if (!turbo) showGeneration(); };
+$('reset').onclick = () => { turbo = false; $('turbo').classList.remove('on'); start(); };
+
+start();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

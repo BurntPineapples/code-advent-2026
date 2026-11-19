@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 17 · Northern Lights</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#02040a; font-family:system-ui,sans-serif; color:#e8fff3; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; cursor:grab; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:8px; width:max-content; max-width:94vw; flex-wrap:wrap; justify-content:center; }
+  .bar button { background:#000a; color:#e8fff3; border:1px solid #ffffff2a; border-radius:10px; padding:8px 14px; font:inherit; font-size:14px; cursor:pointer; }
+  #storm { background:linear-gradient(90deg,#1fd17a,#9b4dff,#ff4d7a); border:none; color:#fff; font-weight:700; text-shadow:0 1px 2px #0006; }
+  .hint { position:fixed; top:14px; left:50%; transform:translateX(-50%); font-size:13px; color:#e8fff399; pointer-events:none; transition:opacity 1s; width:max-content; max-width:70vw; text-align:center; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div class="hint" id="hint">Drag to look around the sky</div>
+<canvas id="c"></canvas>
+<div class="bar"><button id="storm">⚡ Solar storm</button><button id="snd">♫ Sound: off</button></div>
+
+<script id="fs" type="x-shader">
+precision highp float;
+uniform vec2 R; uniform float T; uniform vec2 LOOK; uniform float STORM;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+}
+float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
+
+// One curtain of light: a wavy vertical sheet hanging over the land.
+float curtain(vec3 p, float seed, float z0) {
+  float x = p.x, speed = 1.0 + STORM * 1.5;
+  float line = z0 + 6.0 * (noise(vec2(x * 0.08 + seed, T * 0.03 * speed)) - 0.5) + 0.7 * sin(x * 0.45 + T * 0.3 * speed + seed);
+  float d = p.z - line;
+  float sheet = exp(-d * d * 6.0);
+  float rays = 0.25 + 0.75 * noise(vec2(x * 2.6 + seed * 3.0, T * 0.22 * speed));      // the fine vertical streaks
+  rays *= 0.55 + 0.45 * noise(vec2(x * 9.0 - T * 0.5 * speed, seed));
+  rays = rays * rays * 1.6;
+  float bottom = 1.0 + 0.3 * noise(vec2(x * 0.35, T * 0.08 + seed));
+  float prof = smoothstep(bottom, bottom + 0.1, p.y) * exp(-(p.y - bottom) * (0.6 - STORM * 0.25));
+  float pulse = 0.55 + 0.45 * sin(x * 0.25 - T * (0.7 + STORM) + seed * 2.0);
+  return sheet * rays * prof * pulse;
+}
+vec3 aurora(vec3 ro, vec3 rd, float jit) {
+  if (rd.y <= 0.02) return vec3(0.0);
+  float t0 = (1.0 - ro.y) / rd.y, t1 = min((7.0 - ro.y) / rd.y, t0 + 45.0);
+  vec3 acc = vec3(0.0);
+  float dt = (t1 - t0) / 48.0;
+  for (int i = 0; i < 48; i++) {
+    vec3 p = ro + rd * (t0 + (float(i) + jit) * dt);
+    float h = clamp((p.y - 1.0) / 5.0, 0.0, 1.0);
+    vec3 high = mix(vec3(0.5, 0.18, 0.95), vec3(1.0, 0.2, 0.42), STORM);
+    vec3 c = mix(vec3(0.12, 1.0, 0.45), high, smoothstep(0.12, 0.7, h));
+    float a = curtain(p, 0.0, 7.0) + 0.8 * curtain(p, 4.7, 12.0) + 0.6 * curtain(p, 9.1, 18.0) + STORM * 0.9 * curtain(p, 2.3, 5.0);
+    acc += c * a * dt;
+  }
+  return acc * (1.1 + 0.8 * STORM);
+}
+
+float ridge(float a, float s, float k) { return 1.0 - abs(fbm(vec2(a * k + s, s)) * 2.0 - 1.0); }
+
+// Everything above the shoreline: sky, stars, aurora, two mountain ranges.
+vec3 sky(vec3 ro, vec3 rd, float jit) {
+  float az = atan(rd.x, rd.z), el = rd.y;
+  vec3 col = mix(vec3(0.01, 0.02, 0.06), vec3(0.0, 0.005, 0.02), clamp(el * 1.5, 0.0, 1.0));
+  vec2 g = vec2(az, asin(clamp(el, -1.0, 1.0))) * 140.0, cell = floor(g);
+  float h = hash(cell);
+  if (h > 0.975) { vec2 o = fract(g) - 0.5 - (vec2(hash(cell + 3.1), hash(cell + 5.7)) - 0.5) * 0.6;
+    col += vec3(0.9, 0.95, 1.0) * smoothstep(0.08, 0.0, length(o)) * (0.5 + 0.5 * sin(T * 3.0 + h * 90.0)) * (h - 0.975) * 40.0; }
+  vec3 au = aurora(ro, rd, jit);
+  col += au;
+  vec3 glow = vec3(0.1, 0.5, 0.3) * (0.15 + 0.25 * STORM);         // the aurora tints the snow
+  float far = 0.02 + 0.075 * ridge(az, 1.3, 3.5) * ridge(az, 4.1, 1.2), near = 0.006 + 0.05 * ridge(az, 7.7, 6.0);
+  if (el < far) {
+    float snow = smoothstep(0.55, 0.8, fbm(vec2(az * 14.0, el * 60.0)) + (el - far) * 9.0 + 0.4);
+    col = mix(vec3(0.03, 0.045, 0.09), vec3(0.3, 0.35, 0.45), snow) * 0.6 + glow * snow * 0.6;
+    col = mix(col, vec3(0.03, 0.05, 0.1), 0.35);                    // distance haze
+  }
+  if (el < near) {
+    float snow = smoothstep(0.55, 0.8, fbm(vec2(az * 20.0 + 3.0, el * 70.0)) + (el - near) * 8.0 + 0.45);
+    col = mix(vec3(0.015, 0.02, 0.045), vec3(0.38, 0.43, 0.55), snow) * 0.6 + glow * snow;
+  }
+  return col;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * R) / R.y;
+  float jit = hash(gl_FragCoord.xy + fract(T));
+  vec3 ro = vec3(0.0, 0.15, 0.0);
+  float yaw = LOOK.x, pit = LOOK.y;
+  vec3 fw = vec3(sin(yaw) * cos(pit), sin(pit), cos(yaw) * cos(pit));
+  vec3 rt = normalize(cross(vec3(0, 1, 0), fw)), up = cross(fw, rt);
+  vec3 rd = normalize(fw * 1.3 + uv.x * rt + uv.y * up);
+  float az = atan(rd.x, rd.z), el = rd.y;
+
+  float shore = -0.055 + 0.012 * (noise(vec2(az * 6.0, 2.0)) - 0.5);
+  vec3 col;
+  if (el > shore) col = sky(ro, rd, jit);
+  else {                                                             // the frozen lake mirrors the sky
+    vec2 q = vec2(az * 30.0, el * 120.0);
+    vec3 rr = normalize(vec3(rd.x, -rd.y + 0.004 * (noise(q) - 0.5), rd.z));
+    col = sky(ro, rr, jit) * 0.55;
+    float ice = smoothstep(0.45, 0.75, fbm(vec2(az * 8.0, 1.0 / (abs(el) + 0.02))));
+    col = mix(col, vec3(0.42, 0.48, 0.6) * (0.25 + 0.2 * STORM) + col * 0.3, ice * 0.6);
+  }
+  // pines along the shore: a row of triangles of random heights
+  float x = az * 70.0, id = floor(x), f = fract(x);
+  float th = (0.012 + 0.04 * hash(vec2(id, 1.0))) * step(0.25, hash(vec2(id, 9.0)));
+  float tri = 1.0 - abs(f * 2.0 - 1.0);
+  if (el > shore - 0.004 && el < shore + th * pow(tri, 0.7) * (0.8 + 0.2 * sin(f * 40.0))) col = vec3(0.01, 0.015, 0.025);
+  // a cabin with a warm window
+  float ca = az - 0.55;
+  if (ca > 0.0 && ca < 0.06) {
+    float roof = shore + 0.03 + 0.02 * (1.0 - abs(ca / 0.03 - 1.0));
+    if (el > shore - 0.003 && el < roof) col = vec3(0.03, 0.02, 0.02);
+    if (abs(ca - 0.03) < 0.007 && el > shore + 0.008 && el < shore + 0.02) col = vec3(1.0, 0.65, 0.25) * 1.4;
+  }
+  if (ca > 0.0 && ca < 0.06 && el < shore - 0.004 && abs(ca - 0.03) < 0.005)   // its reflection in the ice
+    col += vec3(1.0, 0.55, 0.2) * 0.35 * smoothstep(-0.12, shore, el);
+  col *= 1.0 - 0.3 * dot(uv, uv);
+  col = pow(col / (1.0 + col * 0.4), vec3(0.4545));
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+<script>
+const cv = document.getElementById('c'), gl = cv.getContext('webgl', { antialias: false });
+function compile(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n), uR = U('R'), uT = U('T'), uL = U('LOOK'), uS = U('STORM');
+
+let quality = 0.7, yaw = 0, pitch = 0.2, tYaw = 0, tPitch = 0.2, storm = 0, stormUntil = 0, slow = 0, start = performance.now(), last = start;
+function size() { const d = Math.min(devicePixelRatio || 1, 2) * quality; cv.width = Math.round(innerWidth * d); cv.height = Math.round(innerHeight * d); gl.viewport(0, 0, cv.width, cv.height); }
+function frame(now) {
+  const dt = (now - last) / 1000; last = now;
+  if (dt > 0.045 && quality > 0.35) { if (++slow > 20) { quality -= 0.08; size(); slow = 0; } } else slow = 0;
+  const t = (now - start) / 1000;
+  storm += ((t < stormUntil ? 1 : 0) - storm) * Math.min(1, dt * 0.8);
+  yaw += (tYaw - yaw) * 0.1; pitch += (tPitch - pitch) * 0.1;
+  gl.uniform2f(uR, cv.width, cv.height); gl.uniform1f(uT, t); gl.uniform2f(uL, yaw, pitch); gl.uniform1f(uS, storm);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (pad) pad.update(storm);
+  requestAnimationFrame(frame);
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); cv.style.cursor = 'grabbing'; document.getElementById('hint').style.opacity = 0; });
+cv.addEventListener('pointermove', e => { if (!drag) return; tYaw -= (e.clientX - drag.x) * 0.004; tPitch = Math.max(0.0, Math.min(1.1, tPitch + (e.clientY - drag.y) * 0.003)); drag = { x: e.clientX, y: e.clientY }; });
+addEventListener('pointerup', () => { drag = null; cv.style.cursor = 'grab'; });
+document.getElementById('storm').onclick = () => { stormUntil = (performance.now() - start) / 1000 + 12; };
+
+// ---- a slow ambient pad: a few sine voices drifting through a dark filter ----
+let pad = null;
+document.getElementById('snd').onclick = e => {
+  if (!pad) {
+    const ac = new (window.AudioContext || window.webkitAudioContext)(), out = ac.createGain(), lp = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 700; out.gain.value = 0;
+    const verb = ac.createConvolver(), len = ac.sampleRate * 4, ir = ac.createBuffer(2, len, ac.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2; }
+    verb.buffer = ir; lp.connect(out); out.connect(ac.destination); out.connect(verb).connect(ac.destination);
+    const voices = [110, 164.81, 246.94, 329.63, 493.88].map((f, i) => {
+      const o = ac.createOscillator(), g = ac.createGain(), lfo = ac.createOscillator(), lg = ac.createGain();
+      o.type = i < 2 ? 'triangle' : 'sine'; o.frequency.value = f; o.detune.value = (Math.random() - 0.5) * 8;
+      g.gain.value = 0.05; lfo.frequency.value = 0.05 + Math.random() * 0.08; lg.gain.value = 0.04;
+      lfo.connect(lg).connect(g.gain); o.connect(g).connect(lp); o.start(); lfo.start(); return o;
+    });
+    pad = { ac, out, on: false, update(s) { lp.frequency.value = 700 + s * 1600; voices[4].frequency.value = 493.88 * (1 + s * 0.5); } };
+  }
+  pad.on = !pad.on; pad.ac.resume();
+  pad.out.gain.setTargetAtTime(pad.on ? 0.8 : 0, pad.ac.currentTime, 0.8);
+  e.target.textContent = pad.on ? '♫ Sound: on' : '♫ Sound: off';
+};
+addEventListener('resize', size); size(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

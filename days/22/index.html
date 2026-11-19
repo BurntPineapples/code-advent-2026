@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 22 · The Snow Conductor</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#060b18; font-family:system-ui,sans-serif; color:#eef3ff; user-select:none; }
+  #c { display:block; width:100vw; height:100vh; touch-action:none; cursor:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:4; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  #start { position:fixed; inset:0; z-index:3; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .card { background:#0b1430e6; border:1px solid #ffffff22; border-radius:16px; padding:26px 24px; max-width:460px; text-align:center; box-shadow:0 20px 60px #0009; }
+  .card h1 { margin:0 0 6px; font-family:Georgia,serif; font-weight:400; color:#cfe6ff; font-size:clamp(1.5rem,5vw,2.2rem); text-shadow:0 0 20px #8fc6ff66; }
+  .card p { color:#b7c6e6; line-height:1.45; margin:8px 0 18px; font-size:15px; }
+  .card button { display:block; width:100%; margin:8px 0; padding:12px; font:inherit; font-size:16px; border-radius:10px; border:1px solid #ffffff2a; cursor:pointer; background:#ffffff12; color:#eef3ff; }
+  .card button.main { background:#cfe6ff; color:#08142e; font-weight:600; }
+  .card small { color:#8b97b8; display:block; margin-top:10px; }
+  #status { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:2; font-size:15px; color:#dbeaff; text-shadow:0 1px 6px #000; pointer-events:none; text-align:center; max-width:80vw; }
+  #legend { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:max-content; max-width:96vw; pointer-events:none; }
+  #legend span { background:#000a; border:1px solid #ffffff1f; border-radius:99px; padding:5px 11px; font-size:12.5px; color:#d6e4ff; }
+  #snd { position:fixed; top:12px; right:12px; z-index:4; background:#0008; color:#fffb; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  video { display:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<button id="snd">🔔 Sound: on</button>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted></video>
+<div id="status"></div>
+<div id="legend" style="display:none"></div>
+<div id="start">
+  <div class="card">
+    <h1>The Snow Conductor</h1>
+    <p>Stand back from your camera and raise a hand. The snow listens to you, and so does the music.</p>
+    <button class="main" id="cam">✋ Use my camera</button>
+    <button id="mouse">🖱 Use the mouse instead</button>
+    <small>Hand tracking runs entirely in your browser. The video never leaves your computer.</small>
+  </div>
+</div>
+<script type="module">
+// A hand-tracking neural network (MediaPipe Hands) finds 21 points on each hand,
+// 30 times a second. Those points become forces in a 2,500-flake particle system.
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const video = document.getElementById('v');
+const $ = id => document.getElementById(id);
+let W, H, DPR;
+function size() { DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0); }
+size(); addEventListener('resize', size);
+
+// ---------- snow ----------
+const N = 2600;
+const X = new Float32Array(N), Y = new Float32Array(N), VX = new Float32Array(N), VY = new Float32Array(N);
+const R = new Float32Array(N), PH = new Float32Array(N), HOLD = new Uint8Array(N), GLOW = new Float32Array(N);
+for (let i = 0; i < N; i++) { X[i] = Math.random() * W; Y[i] = Math.random() * H; R[i] = 0.6 + Math.random() ** 2 * 3.2; PH[i] = Math.random() * 6.283; VY[i] = 20 + R[i] * 12; }
+const sprite = (() => {
+  const s = document.createElement('canvas'); s.width = s.height = 32; const g = s.getContext('2d');
+  const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(235,245,255,0.8)'); gr.addColorStop(1, 'rgba(200,225,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32); return s;
+})();
+const glitter = [];   // frost drawn by pinching
+const rings = [];     // shock rings from thrown snowballs
+let wind = 0, intensity = 0.35, chordIx = 0;
+
+// ---------- hands ----------
+// Each hand: 21 screen points, palm centre, velocity, and its gesture.
+const hands = new Map();
+const TIPS = [4, 8, 12, 16, 20];
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const SLOT = { Left: 1, Right: 2, mouse: 3 };
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+function updateHand(key, pts, palm, forceFist, forcePinch, now) {
+  let h = hands.get(key);
+  if (!h) { h = { key, slot: SLOT[key], palm, vel: [0, 0], fist: false, pinch: false, seen: now, peak: 0, lastBeat: 0, count: 0, spin: 0 }; hands.set(key, h); }
+  const dt = Math.max(1, now - h.seen) / 1000;
+  const vx = (palm[0] - h.palm[0]) / dt, vy = (palm[1] - h.palm[1]) / dt;
+  h.vel[0] += (vx - h.vel[0]) * 0.5; h.vel[1] += (vy - h.vel[1]) * 0.5;
+  h.palm = palm; h.pts = pts; h.seen = now;
+  let fist = forceFist, pinch = forcePinch;
+  if (pts) {
+    const size = dist(pts[0], pts[9]) || 1;
+    const ext = [8, 12, 16, 20].reduce((s, i) => s + dist(pts[i], pts[0]), 0) / 4 / size;
+    fist = h.fist ? ext < 1.45 : ext < 1.2;                      // hysteresis stops flicker
+    const pd = dist(pts[4], pts[8]) / size;
+    pinch = !fist && (h.pinch ? pd < 0.42 : pd < 0.28);
+  }
+  if (h.fist && !fist) throwBall(h);
+  h.fist = fist; h.pinch = pinch;
+  // Conducting: a fast downward swoop that suddenly slows is a beat.
+  const down = h.vel[1];
+  if (down > h.peak) h.peak = down;
+  if (h.peak > 900 && down < h.peak * 0.35 && now - h.lastBeat > 200) { beat(h, h.peak); h.lastBeat = now; h.peak = 0; }
+  if (down < 200) h.peak *= 0.9;
+}
+function dropHand(h) { if (h.count) throwBall(h, 0.4); hands.delete(h.key); }
+
+function throwBall(h, power = 1) {
+  if (h.count < 5) { release(h.slot); return; }
+  const sp = (250 + Math.min(h.count, 900) * 0.9) * power;
+  for (let i = 0; i < N; i++) if (HOLD[i] === h.slot) {
+    const a = Math.random() * 6.283, s = sp * (0.3 + Math.random() * 0.9);
+    VX[i] = Math.cos(a) * s + h.vel[0] * 0.5; VY[i] = Math.sin(a) * s + h.vel[1] * 0.5; GLOW[i] = 1; HOLD[i] = 0;
+  }
+  rings.push({ x: h.palm[0], y: h.palm[1], r: 10, a: 1, max: 120 + h.count * 0.5 });
+  burstSound(h.count);
+  h.count = 0;
+}
+function release(slot) { for (let i = 0; i < N; i++) if (HOLD[i] === slot) HOLD[i] = 0; }
+
+// ---------- physics ----------
+function step(dt, t) {
+  const hs = [...hands.values()];
+  const active = Math.round(700 + intensity * (N - 700));
+  wind *= Math.pow(0.4, dt);
+  for (const h of hs) { h.count = 0; h.spin += dt * 3; }
+  for (let i = 0; i < N; i++) {
+    if (HOLD[i]) {
+      const h = hs.find(q => q.slot === HOLD[i]);
+      if (!h) { HOLD[i] = 0; continue; }
+      h.count++;
+      const rad = (8 + Math.sqrt(h.count) * 2.2) * (0.25 + (PH[i] % 1) * 0.75);
+      const a = PH[i] * 7 + h.spin * (1 + (i % 3) * 0.3);
+      const tx = h.palm[0] + Math.cos(a) * rad, ty = h.palm[1] + Math.sin(a * 1.3) * rad;
+      VX[i] = (tx - X[i]) * 12; VY[i] = (ty - Y[i]) * 12;
+      X[i] += VX[i] * dt; Y[i] += VY[i] * dt; GLOW[i] = Math.min(1, GLOW[i] + dt * 2);
+      continue;
+    }
+    // gravity toward a terminal fall speed, a breeze, and a gentle sway
+    const fall = 18 + R[i] * 14;
+    VY[i] += (fall - VY[i]) * Math.min(1, dt * 1.2);
+    VX[i] += (wind * (0.5 + R[i] * 0.25) + Math.sin(t * 0.0009 + PH[i]) * 14 - VX[i]) * Math.min(1, dt * 0.9);
+    for (const h of hs) {
+      const pts = h.pts ? TIPS.map(k => h.pts[k]).concat([h.palm]) : [h.palm];
+      const rr = h.pts ? 34 : 60;
+      for (const p of pts) {
+        const dx = X[i] - p[0], dy = Y[i] - p[1], d2 = dx * dx + dy * dy;
+        if (d2 < rr * rr && d2 > 0.01) {          // fingers sweep snow aside and drag it along
+          const d = Math.sqrt(d2), push = (rr - d) / rr;
+          VX[i] += (dx / d * 260 * push + h.vel[0] * 0.35) * push; VY[i] += (dy / d * 260 * push + h.vel[1] * 0.35) * push;
+        }
+      }
+      if (h.fist) {                               // a fist is a gravity well
+        const dx = h.palm[0] - X[i], dy = h.palm[1] - Y[i], d = Math.hypot(dx, dy) + 1;
+        if (d < 380) {                            // pull inward with a little swirl
+          const f = 7000 * (1 - d / 380) * dt;
+          VX[i] += (dx * 0.9 - dy * 0.45) / d * f; VY[i] += (dy * 0.9 + dx * 0.45) / d * f;
+        }
+        if (d < 34 + Math.sqrt(h.count) * 2) HOLD[i] = h.slot;
+      }
+    }
+    X[i] += VX[i] * dt; Y[i] += VY[i] * dt;
+    GLOW[i] = Math.max(0, GLOW[i] - dt * 0.5);
+    if (Y[i] > H + 10 || Y[i] < -400 || X[i] < -60 || X[i] > W + 60) {
+      if (i < active) { X[i] = Math.random() * (W + 200) - 100 - wind * 0.5; Y[i] = -10 - Math.random() * 60; VX[i] = wind; VY[i] = 20; GLOW[i] = 0; }
+      else { Y[i] = H + 50; VY[i] = 0; VX[i] = 0; }   // parked until the blizzard grows
+    }
+  }
+  for (const h of hs) if (h.pinch) {
+    const p = h.pts ? [(h.pts[4][0] + h.pts[8][0]) / 2, (h.pts[4][1] + h.pts[8][1]) / 2] : h.palm;
+    for (let k = 0; k < 4; k++) glitter.push({ x: p[0] + (Math.random() - 0.5) * 6, y: p[1] + (Math.random() - 0.5) * 6, vx: (Math.random() - 0.5) * 20, vy: Math.random() * 10, life: 1, hue: (t / 20 + Math.random() * 40) % 360 });
+  }
+  for (let i = glitter.length - 1; i >= 0; i--) {
+    const g = glitter[i]; g.x += g.vx * dt + wind * dt * 0.3; g.y += g.vy * dt; g.vy += 6 * dt; g.life -= dt * 0.28;
+    if (g.life <= 0) glitter.splice(i, 1);
+  }
+  if (glitter.length > 5000) glitter.splice(0, glitter.length - 5000);
+  for (let i = rings.length - 1; i >= 0; i--) { const r = rings[i]; r.r += (r.max - r.r) * dt * 5 + 60 * dt; r.a -= dt * 1.6; if (r.a <= 0) rings.splice(i, 1); }
+  // Raise a hand for a blizzard, lower it for a hush.
+  let target = 0.35;
+  if (hs.length) target = Math.max(...hs.map(h => 1 - h.palm[1] / H)) * 1.1;
+  intensity += (Math.min(1, Math.max(0.1, target)) - intensity) * Math.min(1, dt * 1.5);
+  // Sweeping sideways fast starts a wind.
+  for (const h of hs) if (Math.abs(h.vel[0]) > 600) wind += h.vel[0] * dt * 0.5;
+  wind = Math.max(-400, Math.min(400, wind));
+  pad(intensity);
+}
+
+// ---------- drawing ----------
+function draw(t) {
+  if (camOn && video.readyState >= 2) {
+    const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh);
+    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
+    ctx.drawImage(video, (W - vw * s) / 2, (H - vh * s) / 2, vw * s, vh * s);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(6,14,40,0.72)'; ctx.fillRect(0, 0, W, H);
+  } else {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#050a1a'); g.addColorStop(0.7, '#12224a'); g.addColorStop(1, '#2a3a66');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#0a1430';
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, H * 0.82 - Math.sin(x * 0.006) * 30 - Math.sin(x * 0.017 + 2) * 14);
+    ctx.lineTo(W, H); ctx.fill();
+  }
+  const vign = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vign.addColorStop(0, 'rgba(0,0,0,0)'); vign.addColorStop(1, 'rgba(0,0,10,0.55)');
+  ctx.fillStyle = vign; ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < N; i++) {
+    if (Y[i] > H + 20) continue;
+    const s = R[i] * (2.4 + GLOW[i] * 1.5);
+    ctx.globalAlpha = 0.35 + R[i] * 0.12 + GLOW[i] * 0.3;
+    ctx.drawImage(sprite, X[i] - s, Y[i] - s, s * 2, s * 2);
+  }
+  ctx.globalAlpha = 1;
+  for (const g of glitter) {
+    ctx.fillStyle = `hsla(${g.hue},90%,75%,${g.life})`;
+    ctx.fillRect(g.x - 1.5, g.y - 1.5, 3, 3);
+  }
+  for (const r of rings) {
+    ctx.strokeStyle = `rgba(200,230,255,${r.a})`; ctx.lineWidth = 3 * r.a + 0.5;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, 7); ctx.stroke();
+  }
+  for (const h of hands.values()) {
+    if (h.count) {
+      const rad = 18 + Math.sqrt(h.count) * 3;
+      const g = ctx.createRadialGradient(h.palm[0], h.palm[1], 0, h.palm[0], h.palm[1], rad * 1.8);
+      g.addColorStop(0, 'rgba(220,240,255,0.55)'); g.addColorStop(1, 'rgba(160,200,255,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h.palm[0], h.palm[1], rad * 1.8, 0, 7); ctx.fill();
+    }
+    if (h.pts) {
+      ctx.strokeStyle = h.fist ? 'rgba(160,210,255,0.9)' : 'rgba(170,220,255,0.55)'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.shadowColor = '#8fd0ff'; ctx.shadowBlur = 12;
+      ctx.beginPath();
+      for (const [a, b] of BONES) { ctx.moveTo(h.pts[a][0], h.pts[a][1]); ctx.lineTo(h.pts[b][0], h.pts[b][1]); }
+      ctx.stroke();
+      ctx.fillStyle = '#e8f6ff';
+      for (const k of TIPS) { ctx.beginPath(); ctx.arc(h.pts[k][0], h.pts[k][1], h.pinch && (k === 4 || k === 8) ? 6 : 3.5, 0, 7); ctx.fill(); }
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.strokeStyle = h.fist ? 'rgba(180,220,255,0.9)' : 'rgba(180,220,255,0.45)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(h.palm[0], h.palm[1], h.fist ? 14 : 22, 0, 7); ctx.stroke();
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ---------- music: a pad that follows your hand, bells on every beat ----------
+let ac = null, master, padGain, padFilter, padOsc = [], verb, soundOn = true;
+const CHORDS = [[48, 55, 60, 64], [45, 52, 57, 60], [41, 48, 53, 57], [43, 50, 55, 59]];   // C, Am, F, G
+const PENTA = [0, 2, 4, 7, 9];
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+function audio() {
+  if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  master = ac.createGain(); master.gain.value = soundOn ? 0.9 : 0; master.connect(ac.destination);
+  // a simple synthetic reverb: decaying noise as an impulse response
+  verb = ac.createConvolver();
+  const len = ac.sampleRate * 3, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3; }
+  verb.buffer = ir; const wet = ac.createGain(); wet.gain.value = 0.5; verb.connect(wet); wet.connect(master);
+  padFilter = ac.createBiquadFilter(); padFilter.type = 'lowpass'; padFilter.frequency.value = 600; padFilter.Q.value = 0.7;
+  padGain = ac.createGain(); padGain.gain.value = 0;
+  padFilter.connect(padGain); padGain.connect(master); padGain.connect(verb);
+  CHORDS[0].forEach(m => [-6, 6].forEach(det => {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = det;
+    const g = ac.createGain(); g.gain.value = 0.05; o.connect(g); g.connect(padFilter); o.start(); padOsc.push(o);
+  }));
+}
+function pad(level) {
+  if (!ac) return;
+  const t = ac.currentTime;
+  padGain.gain.setTargetAtTime(0.12 + level * 0.35, t, 0.3);
+  padFilter.frequency.setTargetAtTime(300 + level * level * 3200, t, 0.2);
+}
+function bell(f, vol, when = 0) {
+  if (!ac) return;
+  const t = ac.currentTime + when;
+  for (const [m, a, d] of [[1, 1, 2.2], [2.01, 0.5, 1.2], [3.0, 0.25, 0.8], [4.2, 0.15, 0.5]]) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = f * m; o.connect(g); g.connect(master); g.connect(verb);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol * a, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.start(t); o.stop(t + d + 0.1);
+  }
+}
+function beat(h, speed) {
+  chordIx = (chordIx + 1) % CHORDS.length;
+  const ch = CHORDS[chordIx];
+  if (ac) padOsc.forEach((o, i) => o.frequency.setTargetAtTime(mtof(ch[i >> 1]), ac.currentTime, 0.08));
+  const height = 1 - h.palm[1] / H;
+  const root = ch[0] + 24, vol = Math.min(0.22, 0.08 + speed / 12000);
+  const deg = Math.round(height * 9);
+  const top = root + Math.floor(deg / 5) * 12 + PENTA[deg % 5];
+  [root, root + (ch[2] - ch[0]), top].forEach((m, i) => bell(mtof(m), vol * (i === 2 ? 1 : 0.5), i * 0.05));
+  // the snow pulses with the beat
+  for (let i = 0; i < N; i++) if (!HOLD[i] && Math.random() < 0.3) { VY[i] -= speed * 0.04; GLOW[i] = Math.max(GLOW[i], 0.6); }
+  flash = 1;
+}
+function burstSound(count) {
+  if (!ac) return;
+  const t = ac.currentTime, len = ac.sampleRate * 0.7, b = ac.createBuffer(1, len, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2;
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = b; f.type = 'bandpass'; f.frequency.setValueAtTime(3000, t); f.frequency.exponentialRampToValueAtTime(400, t + 0.6);
+  g.gain.value = Math.min(0.5, 0.1 + count / 1500);
+  s.connect(f); f.connect(g); g.connect(master); g.connect(verb); s.start(t);
+  const ch = CHORDS[chordIx];
+  ch.forEach((m, i) => bell(mtof(m + 36), 0.06, 0.04 + i * 0.06));
+}
+$('snd').onclick = () => {
+  soundOn = !soundOn; $('snd').textContent = soundOn ? '🔔 Sound: on' : '🔔 Sound: off';
+  if (soundOn) audio();
+  if (master) master.gain.setTargetAtTime(soundOn ? 0.9 : 0, ac.currentTime, 0.05);
+};
+let flash = 0;
+
+// ---------- inputs ----------
+let camOn = false, landmarker = null, lastVideoTime = -1;
+const status = s => $('status').textContent = s;
+function legend(items) { const l = $('legend'); l.style.display = 'flex'; l.innerHTML = items.map(s => `<span>${s}</span>`).join(''); }
+
+async function startCamera() {
+  $('start').style.display = 'none';
+  if (soundOn) audio();
+  status('Asking for your camera…');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
+    video.srcObject = stream; await video.play(); camOn = true;
+  } catch (e) { status('No camera available, so the mouse is your hand instead.'); return startMouse(true); }
+  status('Loading the hand-tracking model (about 8 MB)…');
+  try {
+    const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+    const { FilesetResolver, HandLandmarker } = await import(base + '/vision_bundle.mjs');
+    const files = await FilesetResolver.forVisionTasks(base + '/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate: d }, runningMode: 'VIDEO', numHands: 2, minHandDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+    catch { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+  } catch (e) {
+    console.warn(e); status('The hand model could not load (are you offline?). Using the mouse instead.');
+    return startMouse(true);
+  }
+  status('Raise a hand ✋');
+  legend(['✋ Sweep through the snow', '✊ Fist gathers a snowball, open to throw it', '🤏 Pinch to draw with frost', '↕ Raise a hand for a blizzard', '⤵ Swoop down to ring a bell']);
+}
+function startMouse(keepStatus) {
+  $('start').style.display = 'none';
+  if (soundOn) audio();
+  if (!keepStatus) status('');
+  legend(['🖱 Move through the snow', 'Hold the button to gather a snowball, let go to throw it', 'Hold Shift to draw with frost', '↕ Higher means more snow', '⤵ Swoop down fast to ring a bell']);
+  mouseMode = true;
+}
+let mouseMode = false, mdown = false, shift = false, mpos = null;
+$('cam').onclick = startCamera;
+$('mouse').onclick = () => startMouse(false);
+cv.addEventListener('pointerdown', e => { mdown = true; mpos = [e.clientX, e.clientY]; if (soundOn) audio(); });
+addEventListener('pointerup', () => mdown = false);
+cv.addEventListener('pointermove', e => { mpos = [e.clientX, e.clientY]; });
+addEventListener('keydown', e => { if (e.key === 'Shift') shift = true; });
+addEventListener('keyup', e => { if (e.key === 'Shift') shift = false; });
+
+function trackHands(now) {
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  let res;
+  try { res = landmarker.detectForVideo(video, now); } catch { return; }
+  const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh);
+  const dx = (W - vw * s) / 2, dy = (H - vh * s) / 2;
+  const seen = new Set();
+  (res.landmarks || []).forEach((lm, k) => {
+    // The camera image is mirrored on screen, so MediaPipe's "Left" is your right hand. The label is only an ID here.
+    let key = res.handednesses?.[k]?.[0]?.categoryName || (k ? 'Right' : 'Left');
+    if (seen.has(key)) key = key === 'Left' ? 'Right' : 'Left';
+    seen.add(key);
+    const pts = lm.map(p => [W - (dx + p.x * vw * s), dy + p.y * vh * s]);
+    const palm = [0, 5, 9, 13, 17].reduce((a, i) => [a[0] + pts[i][0] / 5, a[1] + pts[i][1] / 5], [0, 0]);
+    updateHand(key, pts, palm, false, false, now);
+  });
+  for (const h of [...hands.values()]) if (h.key !== 'mouse' && !seen.has(h.key) && now - h.seen > 250) dropHand(h);
+  const n = res.landmarks?.length || 0;
+  status(n ? '' : 'Raise a hand ✋');
+}
+
+// for testing without a camera: feed fake landmarks (normalised 0..1, like MediaPipe)
+window.fakeHand = (key, lm, now = performance.now()) => {
+  const pts = lm.map(p => [W - p.x * W, p.y * H]);
+  const palm = [0, 5, 9, 13, 17].reduce((a, i) => [a[0] + pts[i][0] / 5, a[1] + pts[i][1] / 5], [0, 0]);
+  updateHand(key, pts, palm, false, false, now);
+};
+window.sim = { step, draw, hands, HOLD, get intensity() { return intensity; } };
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (camOn) trackHands(now);
+  if (mouseMode && mpos) updateHand('mouse', null, mpos, mdown, shift, now);
+  step(dt, now);
+  draw(now);
+  if (flash > 0) { ctx.fillStyle = `rgba(200,225,255,${flash * 0.08})`; ctx.fillRect(0, 0, W, H); flash = Math.max(0, flash - dt * 3); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

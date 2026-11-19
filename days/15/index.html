@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 15 · Bell Wave</title>
+<style>
+  html,body { margin:0; height:100%; overflow:hidden; background:#0b0a12; font-family:system-ui,sans-serif; color:#f4ead6; user-select:none; }
+  canvas { display:block; width:100vw; height:100vh; cursor:grab; touch-action:none; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .bar { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:2; display:flex; gap:6px; flex-wrap:wrap; justify-content:center; align-items:center; width:max-content; max-width:94vw; }
+  .bar > * { background:#000a; color:#f4ead6; border:1px solid #ffffff26; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; }
+  .bar button { cursor:pointer; }
+  .bar button.on { background:#e8c66a; color:#1a1200; }
+  .bar label { display:flex; gap:6px; align-items:center; }
+  .bar input { width:90px; }
+  #pattern { position:fixed; top:14px; left:50%; transform:translateX(-50%); font-family:Georgia,serif; font-size:clamp(1rem,3vw,1.5rem); color:#e8c66a; text-align:center; text-shadow:0 0 18px #e8c66a66; pointer-events:none; }
+  #clock { position:fixed; top:12px; right:14px; font-variant-numeric:tabular-nums; font-size:13px; color:#f4ead6aa; text-align:right; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div id="pattern"></div>
+<div id="clock"></div>
+<canvas id="c"></canvas>
+<div class="bar" id="bar">
+  <button id="snd">🔔 Sound: off</button>
+  <button id="pause">❚❚</button>
+  <button id="reset">Line them up</button>
+  <label>Speed <input id="spd" type="range" min="0.1" max="3" step="0.05" value="1"></label>
+  <button data-view="front">Front</button><button data-view="side">End-on</button><button data-view="top">Above</button>
+</div>
+<script>
+// 15 pendulums. In 60 seconds, pendulum i swings exactly 51 + i times, so they drift
+// in and out of step and line up again every minute.
+const N = 15, CYCLE = 60, BASE = 51, AMP = 0.38;
+const PENTA = [0, 2, 4, 7, 9];
+const pitch = i => 261.63 * 2 ** ((Math.floor(i / 5) * 12 + PENTA[i % 5]) / 12);    // C4 pentatonic, up three octaves
+const periods = Array.from({ length: N }, (_, i) => CYCLE / (BASE + i));
+const lengths = periods.map(T => 7.2 * (T / periods[0]) ** 2);                        // L ∝ T² like a real pendulum
+const xs = Array.from({ length: N }, (_, i) => (i - (N - 1) / 2) * 0.95);
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR, t = 0, paused = false, yaw = -0.55, pitchA = 0.32, tYaw = yaw, tPitch = pitchA;
+const lastSign = new Array(N).fill(1), glow = new Float32Array(N);
+
+function size() { DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0); }
+function project(x, y, z) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitchA), sp = Math.sin(pitchA);
+  const X = x * cy + z * sy, Z1 = -x * sy + z * cy;
+  const Y = y * cp - Z1 * sp, Z = y * sp + Z1 * cp;
+  const f = Math.min(W, H) * 1.35 / (24 - Z);
+  return [W / 2 + X * f, H * 0.3 - Y * f, f, Z];
+}
+
+function bell(x, y, s, ang, g) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  if (g > 0.02) {
+    const h = ctx.createRadialGradient(0, s * 0.6, 0, 0, s * 0.6, s * 3);
+    h.addColorStop(0, `rgba(255,214,120,${0.55 * g})`); h.addColorStop(1, 'rgba(255,214,120,0)');
+    ctx.fillStyle = h; ctx.beginPath(); ctx.arc(0, s * 0.6, s * 3, 0, 7); ctx.fill();
+  }
+  const gr = ctx.createLinearGradient(-s, 0, s, 0);
+  gr.addColorStop(0, '#8a6a22'); gr.addColorStop(0.35, '#ffe39a'); gr.addColorStop(0.6, '#d9a93c'); gr.addColorStop(1, '#6e5218');
+  ctx.fillStyle = gr;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.32, 0); ctx.quadraticCurveTo(-s * 0.42, s * 0.6, -s * 0.95, s * 1.15);
+  ctx.lineTo(s * 0.95, s * 1.15); ctx.quadraticCurveTo(s * 0.42, s * 0.6, s * 0.32, 0); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#5a4214'; ctx.beginPath(); ctx.ellipse(0, s * 1.15, s * 0.95, s * 0.18, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#3a2a0c'; ctx.beginPath(); ctx.arc(Math.sin(t * 9) * s * 0.15, s * 1.25, s * 0.18, 0, 7); ctx.fill();
+  ctx.fillStyle = '#c4142a'; ctx.beginPath(); ctx.ellipse(0, -s * 0.05, s * 0.4, s * 0.14, 0, 0, 7); ctx.fill();   // a red ribbon knot
+  ctx.restore();
+}
+
+function draw() {
+  const bg = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, Math.hypot(W, H) / 1.5);
+  bg.addColorStop(0, '#2a1d14'); bg.addColorStop(1, '#09080d'); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  // wooden frame: a beam and two posts
+  const ends = [xs[0] - 1, xs[N - 1] + 1];
+  ctx.lineCap = 'round';
+  for (const ex of ends) { const [x1, y1, f] = project(ex, 0.3, 0), [x2, y2] = project(ex, -10, 0); ctx.strokeStyle = '#4a2e18'; ctx.lineWidth = f * 0.35; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  { const [x1, y1, f] = project(ends[0], 0.3, 0), [x2, y2] = project(ends[1], 0.3, 0); ctx.strokeStyle = '#6b4424'; ctx.lineWidth = f * 0.4; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  // the floor's shadow ring under each bell helps your eye read the wave
+  const items = [];
+  for (let i = 0; i < N; i++) {
+    const th = AMP * Math.cos(2 * Math.PI * (BASE + i) * t / CYCLE), L = lengths[i];
+    const bx = xs[i], by = -L * Math.cos(th), bz = L * Math.sin(th);
+    items.push({ i, p: project(xs[i], 0, 0), b: project(bx, by, bz), sh: project(bx, -10, bz) });
+  }
+  ctx.fillStyle = '#0006';
+  for (const it of items) { ctx.beginPath(); ctx.ellipse(it.sh[0], it.sh[1], it.sh[2] * 0.6, it.sh[2] * 0.22, 0, 0, 7); ctx.fill(); }
+  items.sort((a, b) => a.b[3] - b.b[3]);                    // far bells first
+  for (const it of items) {
+    const [px, py] = it.p, [bx, by, f] = it.b;
+    ctx.strokeStyle = '#d9c9a8aa'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(bx, by); ctx.stroke();
+    bell(bx, by, f * 0.58, Math.atan2(px - bx, by - py), glow[it.i]);
+  }
+}
+
+// ---- sound: hand-bell partials, struck once per swing ----
+let ac = null, soundOn = false;
+function strike(i) {
+  glow[i] = 1;
+  if (!soundOn) return;
+  const f = pitch(i), now = ac.currentTime;
+  for (const [m, v, d] of [[1, 0.09, 1.6], [2.0, 0.04, 0.9], [3.0, 0.025, 0.5], [4.16, 0.02, 0.3]]) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = f * m; g.gain.setValueAtTime(0, now); g.gain.linearRampToValueAtTime(v, now + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, now + d);
+    o.connect(g).connect(ac.destination); o.start(now); o.stop(now + d + 0.05);
+  }
+}
+
+function patternName() {
+  const ph = t % CYCLE, near = (a, tol = 0.7) => Math.abs(ph - a) < tol || Math.abs(ph - a - CYCLE) < tol;
+  if (near(0, 1.2)) return 'One line';
+  for (const k of [2, 3, 4, 5, 6]) for (let j = 1; j < k; j++) if (near(CYCLE * j / k, 0.5)) return k === 2 ? 'Two lines, swinging opposite' : `${k} interleaved lines`;
+  if (near(CYCLE / 2, 6)) return 'Ripples';
+  return '';
+}
+
+let last = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000 || 0); last = now;
+  yaw += (tYaw - yaw) * 0.08; pitchA += (tPitch - pitchA) * 0.08;
+  if (!paused) {
+    t += dt * +document.getElementById('spd').value;
+    for (let i = 0; i < N; i++) {
+      const s = Math.sign(Math.sin(2 * Math.PI * (BASE + i) * t / CYCLE));   // the swing turns round at the far end
+      if (s > 0 && lastSign[i] <= 0) strike(i);
+      lastSign[i] = s;
+    }
+  }
+  for (let i = 0; i < N; i++) glow[i] *= 0.9;
+  draw();
+  document.getElementById('pattern').textContent = patternName();
+  const left = (CYCLE - (t % CYCLE)) % CYCLE;
+  document.getElementById('clock').innerHTML = `t = ${t.toFixed(1)} s<br>back in line in ${left.toFixed(1)} s`;
+  requestAnimationFrame(frame);
+}
+
+// ---- input ----
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); cv.style.cursor = 'grabbing'; });
+cv.addEventListener('pointermove', e => { if (!drag) return; tYaw += (e.clientX - drag.x) * 0.006; tPitch = Math.max(-0.2, Math.min(1.45, tPitch + (e.clientY - drag.y) * 0.004)); drag = { x: e.clientX, y: e.clientY }; });
+addEventListener('pointerup', () => { drag = null; cv.style.cursor = 'grab'; });
+const VIEWS = { front: [-0.55, 0.32], side: [-1.45, 0.25], top: [0, 1.4] };
+document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { [tYaw, tPitch] = VIEWS[b.dataset.view]; });
+document.getElementById('snd').onclick = e => {
+  if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+  ac.resume(); soundOn = !soundOn; e.target.textContent = soundOn ? '🔔 Sound: on' : '🔔 Sound: off'; e.target.classList.toggle('on', soundOn);
+};
+document.getElementById('pause').onclick = e => { paused = !paused; e.target.textContent = paused ? '▶' : '❚❚'; };
+document.getElementById('reset').onclick = () => { t = 0; lastSign.fill(1); };
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); document.getElementById('pause').click(); } });
+addEventListener('resize', size);
+size(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

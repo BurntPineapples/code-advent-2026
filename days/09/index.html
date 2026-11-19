@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 9 · Chimney Drop</title>
+<style>
+  html,body { margin:0; height:100%; background:#050a1c; overflow:hidden; user-select:none; font-family:system-ui,sans-serif; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; cursor:pointer; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR, groundY;
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+let best = +store.get('chimneyBest') || 0;
+let state = 'title', camX, speed, sack, score, combo, houses, presents, parts, texts, wind, windTarget, nextHouseX, cooldown, t, shake, delivered, flakes = [];
+
+function size() {
+  DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  groundY = H * 0.88;
+  flakes = Array.from({ length: 120 }, () => ({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + .5, s: Math.random() * 40 + 20 }));
+}
+const sleighX = () => W * 0.24;
+const sleighY = () => H * 0.2 + Math.sin(t * 2) * 10;
+
+function reset() {
+  camX = 0; speed = 230; sack = 20; score = 0; combo = 0; houses = []; presents = []; parts = []; texts = [];
+  wind = 0; windTarget = 0; nextHouseX = W * 0.9; cooldown = 0; t = 0; shake = 0; delivered = 0;
+  while (nextHouseX < camX + W * 2) addHouse();
+}
+
+function addHouse() {
+  const diff = Math.min(1, delivered / 40);                     // chimneys get narrower as you get better
+  const w = 120 + Math.random() * 110, h = 80 + Math.random() * Math.min(H * 0.32, 170), roof = 30 + Math.random() * 40;
+  const cw = 46 - diff * 18 + Math.random() * 8, ch = 26 + Math.random() * 20;
+  const golden = Math.random() < 0.12;
+  houses.push({ x: nextHouseX, w, h, roof, cw, ch, cx: nextHouseX + w * (0.18 + Math.random() * 0.5), golden, hue: Math.random() * 360, done: false,
+                windows: Array.from({ length: 2 + (w / 60 | 0) }, () => Math.random() < 0.75) });
+  nextHouseX += w + 50 + Math.random() * 150;
+}
+
+function drop() {
+  if (state !== 'play') { if (state !== 'over' || t > 1) { reset(); state = 'play'; audio(); } return; }
+  if (cooldown > 0 || sack <= 0) return;
+  sack--; cooldown = 0.22;
+  presents.push({ x: camX + sleighX() - 10, y: sleighY() + 18, vx: speed, vy: 40, rot: 0, vr: (Math.random() - 0.5) * 6,
+                  c: ['#e33', '#3c6', '#39f', '#fc3', '#e5e'][(Math.random() * 5) | 0], dead: false });
+  whoosh();
+}
+
+function update(dt) {
+  t += dt;
+  if (state !== 'play') return;
+  speed = 230 + Math.min(220, t * 3);
+  camX += speed * dt;
+  cooldown -= dt;
+  if (Math.random() < dt * 0.15) windTarget = (Math.random() - 0.5) * 2 * Math.min(1, t / 40) * 160;
+  wind += (windTarget - wind) * dt * 0.5;
+  while (nextHouseX < camX + W * 1.5) addHouse();
+  houses = houses.filter(h => h.x + h.w > camX - 100);
+
+  for (const p of presents) {
+    if (p.dead) continue;
+    // air drag pulls the present back towards the wind speed, so you have to drop early
+    p.vx += (wind - p.vx) * 0.9 * dt;
+    p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+    for (const h of houses) {
+      const top = groundY - h.h - h.roof - h.ch;
+      if (p.vy > 0 && p.y >= top && p.y - p.vy * dt < top && p.x > h.cx + 4 && p.x < h.cx + h.cw - 4) {
+        p.dead = true; hit(h, p); break;
+      }
+      if (p.x > h.x - 6 && p.x < h.x + h.w + 6) {
+        const rx = (p.x - h.x) / h.w, roofY = groundY - h.h - h.roof * (1 - Math.abs(rx - 0.5) * 2);
+        const inChimney = p.x > h.cx - 6 && p.x < h.cx + h.cw + 6 && p.y > top;
+        if (p.y > roofY - 8 || inChimney) { p.dead = true; p.landed = { x: p.x, y: inChimney ? top - 6 : roofY - 8, rot: p.rot }; miss(p); break; }
+      }
+    }
+    if (!p.dead && p.y > groundY - 8) { p.dead = true; p.landed = { x: p.x, y: groundY - 8, rot: p.rot }; miss(p); }
+  }
+  presents = presents.filter(p => !p.dead || (p.landed && p.landed.x > camX - 50));
+  for (const q of parts) { q.vx *= 0.98; q.vy += q.g * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; }
+  parts = parts.filter(q => q.life > 0);
+  for (const s of texts) { s.y -= 40 * dt; s.life -= dt; }
+  texts = texts.filter(s => s.life > 0);
+  shake *= 0.9;
+  if (sack <= 0 && presents.every(p => p.dead)) gameOver();
+}
+
+function hit(h, p) {
+  combo++; delivered++;
+  const pts = 100 * combo * (h.golden ? 3 : 1);
+  score += pts;
+  if (combo % 5 === 0) { sack += 3; texts.push({ x: p.x, y: p.y - 40, txt: '+3 presents!', c: '#7dff8a', life: 1.4 }); }
+  texts.push({ x: p.x, y: p.y - 10, txt: `+${pts}${combo > 1 ? `  ×${combo}` : ''}`, c: h.golden ? '#ffd34d' : '#fff', life: 1.2 });
+  for (let i = 0; i < 30; i++) { const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 200;
+    parts.push({ x: p.x, y: p.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 120, g: 300, life: 0.6 + Math.random() * 0.6, c: h.golden ? '#ffd34d' : ['#fff', '#ffe9a0', p.c][i % 3], r: 2 + Math.random() * 2 }); }
+  for (let i = 0; i < 10; i++) parts.push({ x: h.cx + h.cw / 2, y: p.y, vx: (Math.random() - .5) * 40, vy: -40 - Math.random() * 60, g: -10, life: 1.5, c: '#9aa3b588', r: 6 + Math.random() * 8 });
+  chime(combo, h.golden);
+}
+function miss(p) {
+  if (combo > 2) texts.push({ x: p.x, y: p.y - 30, txt: 'combo lost', c: '#ff8a8a', life: 1 });
+  combo = 0; shake = 6; thud();
+}
+function gameOver() {
+  state = 'over'; t = 0;
+  if (score > best) { best = score; store.set('chimneyBest', best); }
+}
+
+// ---------- drawing ----------
+function draw() {
+  ctx.save();
+  if (shake > 0.3) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  const sky = ctx.createLinearGradient(0, 0, 0, H); sky.addColorStop(0, '#040817'); sky.addColorStop(1, '#1d2f63');
+  ctx.fillStyle = sky; ctx.fillRect(-10, -10, W + 20, H + 20);
+  ctx.fillStyle = '#fff7d6'; ctx.shadowColor = '#fff7d6'; ctx.shadowBlur = 40; ctx.beginPath(); ctx.arc(W * 0.8, H * 0.16, 34, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+  // parallax hills
+  for (const [k, col, amp, base] of [[0.15, '#16244d', 50, 0.62], [0.35, '#1c2d5e', 35, 0.72]]) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 10) { const wx = x + camX * k; ctx.lineTo(x, H * base - Math.sin(wx * 0.004) * amp - Math.sin(wx * 0.011) * amp * 0.4); }
+    ctx.lineTo(W, H); ctx.fill();
+  }
+  // houses
+  for (const h of houses) {
+    const x = h.x - camX, base = groundY, top = base - h.h;
+    ctx.fillStyle = `hsl(${h.hue},25%,22%)`; ctx.fillRect(x, top, h.w, h.h);
+    const cTop = base - h.h - h.roof - h.ch, cx = h.cx - camX;
+    ctx.fillStyle = h.golden ? '#8a6a1e' : '#6b3a2e'; ctx.fillRect(cx, cTop, h.cw, h.ch + h.roof);
+    ctx.fillStyle = h.golden ? '#ffd34d' : '#8a4a3a'; ctx.fillRect(cx - 4, cTop - 6, h.cw + 8, 8);
+    ctx.fillStyle = '#2a1410'; ctx.fillRect(cx + 3, cTop - 4, h.cw - 6, 4);
+    ctx.fillStyle = `hsl(${h.hue},30%,16%)`; ctx.beginPath(); ctx.moveTo(x - 8, top); ctx.lineTo(x + h.w / 2, top - h.roof); ctx.lineTo(x + h.w + 8, top); ctx.fill();
+    ctx.fillStyle = '#eef4ff'; ctx.beginPath(); ctx.moveTo(x - 8, top); ctx.lineTo(x + h.w / 2, top - h.roof); ctx.lineTo(x + h.w + 8, top); ctx.lineTo(x + h.w + 8, top + 5); ctx.lineTo(x + h.w / 2, top - h.roof + 7); ctx.lineTo(x - 8, top + 5); ctx.fill();
+    h.windows.forEach((on, i) => {
+      const wx = x + 14 + i * ((h.w - 28) / h.windows.length), wy = top + 18;
+      ctx.fillStyle = on ? (h.done ? '#ffe9a0' : '#ffc94d') : '#0e1430';
+      if (on) { ctx.shadowColor = '#ffc94d'; ctx.shadowBlur = 14; }
+      ctx.fillRect(wx, wy, Math.min(26, (h.w - 28) / h.windows.length - 8), 22); ctx.shadowBlur = 0;
+    });
+    if (h.golden) { ctx.fillStyle = '#ffd34d'; const s = 8 + Math.sin(t * 6) * 2; star(cx + h.cw / 2, cTop - 22, s); }
+  }
+  ctx.fillStyle = '#e8efff'; ctx.fillRect(0, groundY, W, H - groundY);
+  // presents
+  for (const p of presents) {
+    const L = p.landed, x = (L ? L.x : p.x) - camX, y = L ? L.y : p.y;
+    if (p.dead && !L) continue;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(L ? L.rot : p.rot);
+    ctx.fillStyle = p.c; ctx.fillRect(-9, -9, 18, 18); ctx.fillStyle = '#fff'; ctx.fillRect(-2, -9, 4, 18); ctx.fillRect(-9, -2, 18, 4);
+    ctx.restore();
+  }
+  // sleigh and reindeer
+  if (state === 'play' || state === 'title') drawSleigh(sleighX(), sleighY());
+  for (const q of parts) { ctx.globalAlpha = Math.min(1, q.life * 2); ctx.fillStyle = q.c; ctx.beginPath(); ctx.arc(q.x - camX, q.y, q.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center';
+  for (const s of texts) { ctx.globalAlpha = Math.min(1, s.life * 2); ctx.fillStyle = s.c; ctx.fillText(s.txt, s.x - camX, s.y); }
+  ctx.globalAlpha = 1;
+  // falling snow
+  ctx.fillStyle = '#fff';
+  for (const f of flakes) { f.y += f.s / 60; f.x -= (speed * 0.02 + wind * 0.01) * (f.r / 2); if (f.y > H) f.y = -3; if (f.x < 0) f.x += W; if (f.x > W) f.x -= W;
+    ctx.globalAlpha = .6; ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  hud();
+}
+function star(x, y, r) { ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, d = i % 2 ? r * .45 : r; ctx.lineTo(x + Math.cos(a) * d, y + Math.sin(a) * d); } ctx.fill(); }
+
+function drawSleigh(x, y) {
+  // two reindeer out front
+  for (const [dx, ph] of [[150, 0], [95, 1.3]]) {
+    const rx = x + dx, ry = y + 4 + Math.sin(t * 8 + ph) * 3, leg = Math.sin(t * 14 + ph) * 8;
+    ctx.strokeStyle = '#c9a26b'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x + 30, y + 6); ctx.lineTo(rx - 14, ry); ctx.stroke();
+    ctx.fillStyle = '#7a4a26';
+    ctx.beginPath(); ctx.ellipse(rx, ry, 18, 8, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(rx + 20, ry - 12, 7, 5, -0.5, 0, 7); ctx.fill();
+    ctx.fillRect(rx + 12, ry - 12, 5, 10);
+    ctx.strokeStyle = '#7a4a26'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(rx - 10, ry + 5); ctx.lineTo(rx - 14 + leg, ry + 18); ctx.moveTo(rx + 10, ry + 5); ctx.lineTo(rx + 6 - leg, ry + 18); ctx.stroke();
+    ctx.strokeStyle = '#d9c3a0'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(rx + 20, ry - 16); ctx.lineTo(rx + 16, ry - 28); ctx.lineTo(rx + 10, ry - 32); ctx.moveTo(rx + 17, ry - 25); ctx.lineTo(rx + 24, ry - 30); ctx.stroke();
+  }
+  // sleigh
+  ctx.fillStyle = '#5a3a1e'; ctx.beginPath(); ctx.ellipse(x - 20, y - 6, 18, 16, 0, 0, 7); ctx.fill();      // the sack
+  ctx.fillStyle = '#c4142a';
+  ctx.beginPath(); ctx.moveTo(x - 42, y - 6); ctx.lineTo(x + 18, y - 6); ctx.quadraticCurveTo(x + 34, y - 20, x + 30, y - 2); ctx.lineTo(x + 26, y + 12); ctx.lineTo(x - 38, y + 12); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#e8c66a'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x - 40, y + 20); ctx.lineTo(x + 26, y + 20); ctx.quadraticCurveTo(x + 40, y + 20, x + 38, y + 8); ctx.stroke();
+  ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x - 30, y + 12); ctx.lineTo(x - 30, y + 20); ctx.moveTo(x + 10, y + 12); ctx.lineTo(x + 10, y + 20); ctx.stroke();
+}
+
+function hud() {
+  ctx.textAlign = 'right'; ctx.font = 'bold 20px system-ui'; ctx.fillStyle = '#fff';
+  if (state === 'play') {
+    ctx.fillText(`${score.toLocaleString()}`, W - 16, 32);
+    ctx.font = '14px system-ui'; ctx.fillStyle = '#cfe0ff';
+    ctx.fillText(`🎁 ${sack} left · combo ×${combo} · best ${best.toLocaleString()}`, W - 16, 54);
+    if (Math.abs(wind) > 25) { ctx.fillText(`wind ${wind > 0 ? '→' : '←'} ${Math.abs(wind / 40).toFixed(1)}`, W - 16, 74); }
+  }
+  ctx.textAlign = 'center';
+  if (state !== 'play') {
+    ctx.fillStyle = '#000a'; ctx.fillRect(0, H * 0.32, W, 170);
+    ctx.fillStyle = '#ffd34d'; ctx.font = `bold ${Math.min(48, W / 12)}px system-ui`;
+    ctx.fillText(state === 'title' ? 'Chimney Drop' : `${score.toLocaleString()} points`, W / 2, H * 0.32 + 60);
+    ctx.fillStyle = '#fff'; ctx.font = '16px system-ui';
+    ctx.fillText(state === 'title' ? 'One button. Drop presents down the chimneys. Air drag (and wind) means you must let go early.'
+                                   : (score >= best && score > 0 ? 'A new best! ' : `Best: ${best.toLocaleString()}. `) + `${delivered} presents delivered.`, W / 2, H * 0.32 + 98);
+    ctx.fillStyle = '#cfe0ff'; ctx.fillText('Press Space, click or tap to ' + (state === 'title' ? 'start' : 'fly again'), W / 2, H * 0.32 + 130);
+  }
+}
+
+// ---------- sound (all synthesised) ----------
+let ac;
+function audio() { if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {} } else ac.resume(); }
+function tone(f, len, vol, type = 'sine', when = 0) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), s = ac.currentTime + when;
+  o.type = type; o.frequency.value = f; g.gain.setValueAtTime(vol, s); g.gain.exponentialRampToValueAtTime(0.0001, s + len);
+  o.connect(g).connect(ac.destination); o.start(s); o.stop(s + len);
+}
+function chime(c, gold) { const f = 660 * 2 ** (Math.min(c - 1, 12) / 12); tone(f, 0.6, 0.15); tone(f * 1.5, 0.5, 0.08, 'sine', 0.06); if (gold) tone(f * 2, 0.8, 0.08, 'triangle', 0.12); }
+function thud() { if (!ac) return; const o = ac.createOscillator(), g = ac.createGain(), s = ac.currentTime; o.frequency.setValueAtTime(140, s); o.frequency.exponentialRampToValueAtTime(50, s + 0.2); g.gain.setValueAtTime(0.3, s); g.gain.exponentialRampToValueAtTime(0.001, s + 0.25); o.connect(g).connect(ac.destination); o.start(s); o.stop(s + 0.3); }
+function whoosh() { if (!ac) return; const o = ac.createOscillator(), g = ac.createGain(), s = ac.currentTime; o.type = 'triangle'; o.frequency.setValueAtTime(900, s); o.frequency.exponentialRampToValueAtTime(300, s + 0.18); g.gain.setValueAtTime(0.05, s); g.gain.exponentialRampToValueAtTime(0.001, s + 0.2); o.connect(g).connect(ac.destination); o.start(s); o.stop(s + 0.2); }
+
+cv.addEventListener('pointerdown', drop);
+addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); if (!e.repeat) drop(); } });
+addEventListener('resize', () => { size(); });
+size(); reset();
+let last = 0;
+(function loop(now) { const dt = Math.min(0.033, (now - last) / 1000 || 0); last = now; update(dt); draw(); requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 10 · Ornament Lathe</title>
+<style>
+  :root { --ink:#f1ecff; --dim:#a89fc4; --panel:#140f24ee; --acc:#ffcf6e; }
+  html,body { margin:0; height:100%; overflow:hidden; font-family:system-ui,sans-serif; color:var(--ink);
+              background:radial-gradient(ellipse at 60% 40%, #2a1748 0%, #0b0716 70%); }
+  #view { position:fixed; inset:0; }
+  .back { position:fixed; top:12px; left:12px; z-index:3; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  .panel { position:fixed; z-index:2; left:12px; top:52px; width:250px; background:var(--panel); border:1px solid #ffffff1a; border-radius:14px; padding:12px;
+           display:flex; flex-direction:column; gap:10px; max-height:calc(100vh - 70px); overflow:auto; }
+  .panel h2 { margin:0; font-size:.75rem; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
+  #prof { width:226px; height:300px; background:#0a0714; border-radius:10px; cursor:crosshair; touch-action:none; }
+  .row { display:flex; flex-wrap:wrap; gap:5px; }
+  button { background:#ffffff12; color:var(--ink); border:1px solid #ffffff22; border-radius:7px; padding:5px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  button.on { background:var(--acc); color:#1a1200; border-color:var(--acc); }
+  .sw { width:22px; height:22px; padding:0; border-radius:50%; border:2px solid #fff3; }
+  .sw.on { border-color:#fff; }
+  .big { background:var(--acc); color:#1a1200; font-weight:600; border:none; padding:8px; font-size:13px; }
+  @media (max-width:640px) { .panel { top:auto; bottom:8px; left:8px; right:8px; width:auto; max-height:45vh; } #prof { width:100%; height:180px; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div id="view"></div>
+<div class="panel">
+  <h2>1 · Draw half an ornament</h2>
+  <canvas id="prof" width="452" height="600"></canvas>
+  <div class="row" id="presets"></div>
+  <h2>2 · Paint it</h2>
+  <div class="row" id="colors"></div>
+  <div class="row" id="patterns"></div>
+  <div class="row" id="finishes"></div>
+  <button class="big" id="hang">Hang it on the garland ✨</button>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------- profile editor ----------
+const P = document.getElementById('prof'), pc = P.getContext('2d');
+const BINS = 64;
+let radius = new Float32Array(BINS);      // radius (0..1) at each height, top to bottom
+const PRESETS = {
+  Classic: y => Math.sqrt(Math.max(0, 1 - (2 * y - 1) ** 2)),
+  Teardrop: y => Math.sin(Math.PI * y ** 0.7) * (0.35 + 0.65 * y),
+  Onion: y => Math.sin(Math.PI * y) ** 1.6 * (y < 0.55 ? (y / 0.55) ** 1.5 : 1),
+  Bell: y => y < 0.15 ? 0.25 : Math.min(1, 0.25 + 0.75 * ((y - 0.15) / 0.85) ** 2) * (y > 0.95 ? (1 - y) / 0.05 * 0.3 + 0.7 : 1),
+  Icicle: y => 0.55 * (1 - y) ** 1.2 * (1 + 0.15 * Math.sin(y * 30)),
+  Finial: y => 0.35 + 0.35 * Math.sin(y * Math.PI * 3) ** 2 * (1 - y * 0.6) + (y > 0.85 ? -(y - 0.85) * 2.2 : 0),
+};
+function setPreset(f) { for (let i = 0; i < BINS; i++) radius[i] = Math.max(0, Math.min(1, f(i / (BINS - 1)))); finish(); }
+function finish() {      // pinch the top and bottom shut so the surface is closed
+  radius[0] = Math.min(radius[0], 0.12); radius[BINS - 1] = 0;
+  drawProfile(); rebuild();
+}
+function drawProfile() {
+  const w = P.width, h = P.height, ax = w / 2, s = w * 0.45;
+  pc.clearRect(0, 0, w, h);
+  pc.strokeStyle = '#ffffff22'; pc.setLineDash([6, 6]); pc.beginPath(); pc.moveTo(ax, 0); pc.lineTo(ax, h); pc.stroke(); pc.setLineDash([]);
+  const pts = side => [...radius].map((r, i) => [ax + side * r * s, 30 + i / (BINS - 1) * (h - 60)]);
+  pc.fillStyle = '#ffcf6e22'; pc.beginPath(); pts(1).forEach(p => pc.lineTo(...p)); pts(-1).reverse().forEach(p => pc.lineTo(...p)); pc.fill();
+  pc.strokeStyle = '#ffcf6e'; pc.lineWidth = 4; pc.beginPath(); pts(1).forEach(p => pc.lineTo(...p)); pc.stroke();
+  pc.strokeStyle = '#ffcf6e66'; pc.lineWidth = 2; pc.beginPath(); pts(-1).forEach(p => pc.lineTo(...p)); pc.stroke();
+  pc.fillStyle = '#a89fc4'; pc.font = '22px system-ui'; pc.fillText('draw on this side →', ax + 10, h - 8);
+}
+let drawing = false, lastBin = null;
+function profAt(e) {
+  const r = P.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * P.width, y = (e.clientY - r.top) / r.height * P.height;
+  const bin = Math.round((y - 30) / (P.height - 60) * (BINS - 1)), rad = Math.abs(x - P.width / 2) / (P.width * 0.45);
+  return [Math.max(0, Math.min(BINS - 1, bin)), Math.min(1, rad)];
+}
+P.addEventListener('pointerdown', e => { drawing = true; P.setPointerCapture(e.pointerId); lastBin = null; paintProf(e); });
+P.addEventListener('pointermove', e => drawing && paintProf(e));
+addEventListener('pointerup', () => { if (drawing) { drawing = false; smooth(); finish(); } });
+function paintProf(e) {
+  const [b, r] = profAt(e);
+  if (lastBin === null) radius[b] = r;
+  else { const [b0, r0] = lastBin, n = Math.abs(b - b0); for (let k = 0; k <= n; k++) radius[b0 + Math.sign(b - b0) * k] = r0 + (r - r0) * (n ? k / n : 1); }
+  lastBin = [b, r]; drawProfile(); rebuild();
+}
+function smooth() { const c = radius.slice(); for (let i = 1; i < BINS - 1; i++) radius[i] = (c[i - 1] + 2 * c[i] + c[i + 1]) / 4; }
+
+// ---------- 3D scene ----------
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.toneMapping = THREE.ACESFilmicToneMapping;
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+camera.position.set(0, 0.3, 6.2);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.minDistance = 3; controls.maxDistance = 12; controls.target.set(0, 0.2, 0);
+const warm = new THREE.PointLight(0xffb070, 30, 20); warm.position.set(-3, 2, 3); scene.add(warm);
+const cool = new THREE.PointLight(0x7090ff, 20, 20); cool.position.set(3, -1, 2); scene.add(cool);
+
+// soft bokeh lights in the background
+const bokehTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'), r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  r.addColorStop(0, '#fff'); r.addColorStop(0.6, '#ffffff55'); r.addColorStop(1, '#fff0'); g.fillStyle = r; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+for (let i = 0; i < 40; i++) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: bokehTex, color: new THREE.Color().setHSL([0.02, 0.1, 0.33, 0.55][i % 4], 0.9, 0.6), transparent: true, opacity: 0.35, depthWrite: false }));
+  s.position.set((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 9, -6 - Math.random() * 6); s.scale.setScalar(0.4 + Math.random() * 1.2); scene.add(s);
+}
+
+let color = '#c4142a', accent = '#f3d27a', pattern = 'Stripes', finishName = 'Glossy';
+function patternTexture() {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512; const g = c.getContext('2d');
+  g.fillStyle = color; g.fillRect(0, 0, 1024, 512); g.fillStyle = accent; g.strokeStyle = accent;
+  if (pattern === 'Stripes') for (const y of [150, 230, 330]) g.fillRect(0, y, 1024, y === 230 ? 34 : 12);
+  if (pattern === 'Swirl') { g.lineWidth = 26; for (let k = -6; k < 12; k++) { g.beginPath(); g.moveTo(k * 128, 0); g.lineTo(k * 128 + 512, 512); g.stroke(); } }
+  if (pattern === 'Dots') for (let y = 40; y < 512; y += 64) for (let x = (y / 64 % 2) * 32; x < 1024; x += 64) { g.beginPath(); g.arc(x, y, 11, 0, 7); g.fill(); }
+  if (pattern === 'Zigzag') { g.lineWidth = 16; for (const y0 of [170, 300]) { g.beginPath(); for (let x = 0; x <= 1024; x += 64) g.lineTo(x, y0 + (x / 64 % 2 ? 40 : 0)); g.stroke(); } }
+  if (pattern === 'Snowflakes') { g.lineWidth = 5; for (let i = 0; i < 18; i++) { const x = (i * 157) % 1024, y = 90 + (i * 97) % 340; for (let a = 0; a < 6; a++) { g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a * Math.PI / 3) * 22, y + Math.sin(a * Math.PI / 3) * 22); g.stroke(); } } }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; t.anisotropy = 8;
+  return t;
+}
+const glitterMap = (() => {      // random surface normals: thousands of tiny mirrors that catch the light
+  const c = document.createElement('canvas'); c.width = c.height = 512; const g = c.getContext('2d'), img = g.createImageData(512, 512);
+  for (let i = 0; i < img.data.length; i += 4) { img.data[i] = 128 + (Math.random() - .5) * 200; img.data[i + 1] = 128 + (Math.random() - .5) * 200; img.data[i + 2] = 255; img.data[i + 3] = 255; }
+  g.putImageData(img, 0, 0); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6, 3); return t;
+})();
+const FINISHES = {
+  Glossy: { metalness: 0.15, roughness: 0.12, clearcoat: 1 },
+  Chrome: { metalness: 1, roughness: 0.06, clearcoat: 0.6 },
+  Satin: { metalness: 0.65, roughness: 0.42, clearcoat: 0 },
+  Glitter: { metalness: 0.9, roughness: 0.3, clearcoat: 0.3, glitter: true },
+};
+function makeMaterial() {
+  const f = FINISHES[finishName];
+  return new THREE.MeshPhysicalMaterial({ map: patternTexture(), metalness: f.metalness, roughness: f.roughness, clearcoat: f.clearcoat, clearcoatRoughness: 0.08,
+    normalMap: f.glitter ? glitterMap : null, normalScale: new THREE.Vector2(0.6, 0.6), envMapIntensity: 1.2 });
+}
+
+function buildOrnament() {
+  const H = 2.2, pts = [...radius].map((r, i) => new THREE.Vector2(Math.max(0.001, r) * 1.05, H / 2 - i / (BINS - 1) * H));
+  const body = new THREE.Mesh(new THREE.LatheGeometry(pts, 128), makeMaterial());
+  const g = new THREE.Group(); g.add(body);
+  const gold = new THREE.MeshPhysicalMaterial({ color: 0xd8b25a, metalness: 1, roughness: 0.25 });
+  const capR = Math.max(0.1, radius[1] * 1.05 + 0.04);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(capR, capR, 0.16, 32), gold); cap.position.y = H / 2 + 0.06; g.add(cap);
+  const loop = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.018, 12, 32), gold); loop.position.y = H / 2 + 0.21; g.add(loop);
+  return g;
+}
+
+// The ornament hangs from a thread and swings like a pendulum.
+const pivot = new THREE.Group(); pivot.position.y = 2.6; scene.add(pivot);
+const thread = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1.1, 6), new THREE.MeshBasicMaterial({ color: 0xd8b25a }));
+thread.position.y = -0.55; pivot.add(thread);
+let current = null;
+function rebuild() {
+  if (current) { pivot.remove(current); current.traverse(o => { o.geometry?.dispose(); if (o.material?.map) o.material.map.dispose(); }); }
+  current = buildOrnament(); current.position.y = -1.1 - 1.15; pivot.add(current);
+}
+
+// Garland of finished ornaments along the top
+const garland = new THREE.Group(); scene.add(garland);
+const hung = [];
+const garlandY = x => 2.45 - 0.25 * (1 - (x / 4) ** 2);
+{
+  const pts = []; for (let x = -5; x <= 5; x += 0.25) pts.push(new THREE.Vector3(x, garlandY(x), -1.5));
+  garland.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 80, 0.05, 8), new THREE.MeshStandardMaterial({ color: 0x1f6b3a, roughness: 0.8 })));
+}
+document.getElementById('hang').onclick = () => {
+  const o = buildOrnament(); o.scale.setScalar(0.32);
+  const slots = [-2.2, 2.2, -1.5, 1.5, -2.9, 2.9];
+  const x = slots[hung.length % slots.length];
+  if (hung.length >= slots.length) garland.remove(hung.shift().holder);
+  const holder = new THREE.Group(); holder.position.set(x, garlandY(x), -1.5); holder.add(o); o.position.y = -0.45; garland.add(holder);
+  hung.push({ holder, phase: Math.random() * 6 });
+  current.rotation.y += Math.PI;            // a little flourish
+};
+
+// ---------- UI ----------
+function buttons(id, items, onPick, initial, swatch) {
+  const row = document.getElementById(id);
+  for (const it of items) {
+    const b = document.createElement('button'); if (swatch) { b.className = 'sw'; b.style.background = it[0]; b.title = it[1]; } else b.textContent = it;
+    b.onclick = () => { [...row.children].forEach(x => x.classList.toggle('on', x === b)); onPick(it); };
+    if (it === initial || (swatch && it[0] === initial)) b.classList.add('on');
+    row.appendChild(b);
+  }
+}
+buttons('presets', Object.keys(PRESETS), n => setPreset(PRESETS[n]), 'Classic');
+buttons('colors', [['#c4142a', '#f3d27a'], ['#1f6b3a', '#f3d27a'], ['#1d3f9a', '#e9eef7'], ['#d8b25a', '#7a1020'], ['#e9eef7', '#c4142a'], ['#6a2c91', '#f2c84b'], ['#e46ba8', '#ffffff'], ['#121218', '#d8b25a']],
+        ([c, a]) => { color = c; accent = a; rebuild(); }, '#c4142a', true);
+buttons('patterns', ['Plain', 'Stripes', 'Swirl', 'Dots', 'Zigzag', 'Snowflakes'], p => { pattern = p; rebuild(); }, 'Stripes');
+buttons('finishes', Object.keys(FINISHES), f => { finishName = f; rebuild(); }, 'Glossy');
+
+function resize() {
+  const w = innerWidth, h = innerHeight; renderer.setSize(w, h); camera.aspect = w / h;
+  if (w > 640) camera.setViewOffset(w, h, -135, 0, w, h); else camera.clearViewOffset();   // keep the ornament clear of the side panel
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+setPreset(PRESETS.Classic);
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const t = clock.getElapsedTime();
+  pivot.rotation.z = Math.sin(t * 1.3) * 0.06;
+  if (current) current.rotation.y = t * 0.5;
+  for (const h of hung) h.holder.rotation.z = Math.sin(t * 1.7 + h.phase) * 0.08, h.holder.children[0].rotation.y = t * 0.6 + h.phase;
+  controls.update(); renderer.render(scene, camera);
+});
+window.__lathe = { setPreset, PRESETS, rebuild, scene };
+</script>
+</body>
+</html>

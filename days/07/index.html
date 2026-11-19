@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 7 · The Neural Painter</title>
+<style>
+  :root { --bg:#0b1020; --card:#121a33; --ink:#e8eeff; --dim:#8d9bc4; --acc:#ffcf6e; }
+  html,body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; }
+  .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0008; padding:6px 10px; border-radius:8px; }
+  header { text-align:center; padding:48px 16px 6px; }
+  h1 { margin:0; font-size:clamp(1.5rem,4vw,2.3rem); }
+  .sub { color:var(--dim); margin-top:6px; font-size:.95rem; }
+  .row { display:flex; flex-wrap:wrap; gap:18px; justify-content:center; padding:16px; }
+  .card { background:var(--card); border-radius:14px; padding:14px; box-shadow:0 8px 30px #0006; display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .card h2 { margin:0; font-size:.85rem; font-weight:600; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  canvas.big { width:min(80vw,300px); height:min(80vw,300px); image-rendering:pixelated; border-radius:8px; background:#000; }
+  #target { cursor:crosshair; touch-action:none; }
+  #out { image-rendering:auto; }
+  #neurons { width:min(80vw,300px); height:min(80vw,300px); image-rendering:pixelated; border-radius:8px; }
+  .stats { font-variant-numeric:tabular-nums; color:var(--dim); font-size:.85rem; text-align:center; min-height:1.2em; }
+  .stats b { color:var(--acc); }
+  .controls { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; max-width:340px; }
+  button { background:#ffffff10; color:var(--ink); border:1px solid #ffffff22; border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  button.on { background:var(--acc); color:#1a1200; border-color:var(--acc); }
+  .sw { width:24px; height:24px; border-radius:50%; padding:0; border:2px solid #fff3; }
+  .sw.on { border-color:#fff; }
+  #loss { width:300px; max-width:80vw; height:50px; }
+  #hd { position:fixed; inset:0; background:#000d; display:none; align-items:center; justify-content:center; flex-direction:column; gap:10px; z-index:5; }
+  #hd canvas { width:min(90vw,80vh); height:min(90vw,80vh); border-radius:10px; }
+  .note { max-width:760px; margin:0 auto 40px; padding:0 16px; color:var(--dim); font-size:.9rem; line-height:1.5; text-align:center; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<header>
+  <h1>The Neural Painter</h1>
+  <div class="sub">A tiny neural network that has never seen a picture is learning to paint one, right now, in your browser.</div>
+</header>
+<div class="row">
+  <div class="card">
+    <h2>The picture (paint on it!)</h2>
+    <canvas id="target" class="big" width="256" height="256"></canvas>
+    <div class="controls" id="presets"></div>
+    <div class="controls" id="swatches"></div>
+  </div>
+  <div class="card">
+    <h2>What the network paints</h2>
+    <canvas id="out" class="big" width="64" height="64"></canvas>
+    <div class="stats" id="stats"></div>
+    <canvas id="loss" width="300" height="50"></canvas>
+    <div class="controls">
+      <button id="fourier" class="on">Fourier features: on</button>
+      <button id="reset">Forget everything</button>
+      <button id="hdbtn">Render at 4× size</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Inside its head: 64 neurons</h2>
+    <canvas id="neurons" width="256" height="256"></canvas>
+    <div class="stats">What each hidden neuron reacts to.<br>Together they add up to the painting.</div>
+  </div>
+</div>
+<p class="note">The network never stores a single pixel. It's a function: give it an (x, y) position and it guesses a colour. Every frame it guesses a few hundred random pixels, checks how wrong it was, and nudges its 6,000 weights a little. Turn <b>Fourier features</b> off to see why modern networks need them, and paint on the left to watch it re-learn.</p>
+<div id="hd"><canvas id="hdc" width="256" height="256"></canvas><button id="hdclose">Close</button><div class="stats" id="hdinfo"></div></div>
+
+<script>
+const S = 64, N = S * S;          // the training picture is 64×64
+const tCv = document.getElementById('target'), tCtx = tCv.getContext('2d');
+const small = document.createElement('canvas'); small.width = small.height = S;
+const sCtx = small.getContext('2d', { willReadFrequently: true });
+let targets = new Float32Array(N * 3);
+
+// ---------- the pictures (all drawn with code) ----------
+const PICS = {
+  Tree(g) {
+    const sky = g.createLinearGradient(0, 0, 0, 256); sky.addColorStop(0, '#0b1a40'); sky.addColorStop(1, '#2b4a8a');
+    g.fillStyle = sky; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#f2f6ff'; g.beginPath(); g.ellipse(128, 250, 190, 40, 0, 0, 7); g.fill();
+    g.fillStyle = '#5a3a1e'; g.fillRect(116, 190, 24, 34);
+    for (const [y, w] of [[200, 90], [160, 72], [120, 54]]) { g.fillStyle = '#1f7a3a'; g.beginPath(); g.moveTo(128, y - 80); g.lineTo(128 + w, y); g.lineTo(128 - w, y); g.fill(); }
+    g.fillStyle = '#ffd34d'; star(g, 128, 42, 18, 8);
+    for (const [x, y, c] of [[100, 180, '#e33'], [150, 170, '#3af'], [120, 140, '#fd3'], [145, 115, '#e3e'], [110, 100, '#e33'], [160, 195, '#fd3'], [88, 150, '#3af']]) { g.fillStyle = c; g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); }
+  },
+  Snowman(g) {
+    g.fillStyle = '#1c3d6e'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#fff'; for (let i = 0; i < 40; i++) { g.beginPath(); g.arc((i * 73) % 256, (i * 151) % 200, 2.5, 0, 7); g.fill(); }
+    g.fillStyle = '#e9f0ff'; g.fillRect(0, 215, 256, 41);
+    for (const [y, r] of [[190, 52], [118, 38], [62, 28]]) { g.fillStyle = '#fbfdff'; g.beginPath(); g.arc(128, y, r, 0, 7); g.fill(); }
+    g.fillStyle = '#222'; g.fillRect(100, 26, 56, 10); g.fillRect(110, -10, 36, 40);
+    g.fillStyle = '#c22'; g.fillRect(110, 22, 36, 6);
+    g.fillStyle = '#f80'; g.beginPath(); g.moveTo(128, 62); g.lineTo(165, 68); g.lineTo(128, 70); g.fill();
+    g.fillStyle = '#222'; for (const [x, y] of [[118, 54], [138, 54], [128, 105], [128, 122], [128, 139]]) { g.beginPath(); g.arc(x, y, 4, 0, 7); g.fill(); }
+    g.fillStyle = '#c22'; g.fillRect(96, 86, 64, 10); g.fillRect(140, 86, 12, 34);
+  },
+  Bauble(g) {
+    g.fillStyle = '#16102a'; g.fillRect(0, 0, 256, 256);
+    g.strokeStyle = '#c9a44a'; g.lineWidth = 3; g.beginPath(); g.moveTo(128, 0); g.lineTo(128, 40); g.stroke();
+    g.fillStyle = '#d6b358'; g.fillRect(112, 38, 32, 20);
+    const r = g.createRadialGradient(100, 110, 8, 128, 148, 95); r.addColorStop(0, '#ff8a8a'); r.addColorStop(0.5, '#c4142a'); r.addColorStop(1, '#4a0410');
+    g.fillStyle = r; g.beginPath(); g.arc(128, 148, 92, 0, 7); g.fill();
+    g.save(); g.clip(); g.fillStyle = '#ffd86b'; for (const y of [120, 175]) g.fillRect(30, y, 200, 10); g.restore();
+    g.fillStyle = '#fff9'; g.beginPath(); g.ellipse(96, 110, 18, 10, -0.6, 0, 7); g.fill();
+  },
+  Sweater(g) {          // lots of fine detail: hard for a network without Fourier features
+    g.fillStyle = '#a3132b'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#f4ecdc';
+    for (let x = 0; x < 256; x += 16) { g.beginPath(); g.moveTo(x, 40); g.lineTo(x + 8, 28); g.lineTo(x + 16, 40); g.fill(); g.beginPath(); g.moveTo(x, 216); g.lineTo(x + 8, 228); g.lineTo(x + 16, 216); g.fill(); }
+    g.fillRect(0, 44, 256, 6); g.fillRect(0, 206, 256, 6);
+    g.fillStyle = '#1f6b3a'; for (let x = 24; x < 256; x += 52) { g.beginPath(); g.moveTo(x, 80); g.lineTo(x + 18, 120); g.lineTo(x - 18, 120); g.fill(); g.beginPath(); g.moveTo(x, 110); g.lineTo(x + 22, 160); g.lineTo(x - 22, 160); g.fill(); }
+    g.fillStyle = '#f4ecdc'; for (let x = 50; x < 256; x += 52) star(g, x, 130, 9, 4);
+    g.fillStyle = '#f4ecdc'; for (let x = 0; x < 256; x += 8) g.fillRect(x, 180, 4, 4), g.fillRect(x + 4, 186, 4, 4);
+  },
+};
+function star(g, x, y, R, r) { g.beginPath(); for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, d = i % 2 ? r : R; g.lineTo(x + Math.cos(a) * d, y + Math.sin(a) * d); } g.fill(); }
+
+function refreshTargets() {
+  sCtx.clearRect(0, 0, S, S); sCtx.drawImage(tCv, 0, 0, S, S);
+  const d = sCtx.getImageData(0, 0, S, S).data;
+  for (let i = 0; i < N; i++) for (let c = 0; c < 3; c++) targets[i * 3 + c] = d[i * 4 + c] / 255;
+}
+
+// ---------- a small neural network, written from scratch ----------
+let fourier = true, NF, B, feats, net, step = 0, lossAvg = 0.1, lossHist = [];
+const NRFF = 32, SIGMA = 5;
+function makeFeatures() {
+  // Random Fourier features: sin/cos of the position projected onto random directions.
+  B = Array.from({ length: NRFF }, () => [gauss() * SIGMA, gauss() * SIGMA]);
+  NF = fourier ? 2 + NRFF * 2 : 2;
+  feats = new Float32Array(N * NF);
+  for (let i = 0; i < N; i++) featuresAt((i % S) / (S - 1) * 2 - 1, ((i / S) | 0) / (S - 1) * 2 - 1, feats, i * NF);
+}
+function featuresAt(x, y, out, o) {
+  out[o] = x; out[o + 1] = y;
+  if (fourier) for (let k = 0; k < NRFF; k++) { const p = Math.PI * (B[k][0] * x + B[k][1] * y); out[o + 2 + 2 * k] = Math.sin(p); out[o + 3 + 2 * k] = Math.cos(p); }
+}
+function gauss() { return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()); }
+
+function makeNet(sizes) {
+  const L = [];
+  for (let l = 1; l < sizes.length; l++) {
+    const nin = sizes[l - 1], nout = sizes[l], sz = nin * nout;
+    const W = new Float32Array(sz).map(() => gauss() * Math.sqrt(2 / nin));
+    L.push({ nin, nout, W, b: new Float32Array(nout), gW: new Float32Array(sz), gb: new Float32Array(nout),
+             mW: new Float32Array(sz), vW: new Float32Array(sz), mb: new Float32Array(nout), vb: new Float32Array(nout),
+             z: new Float32Array(nout), a: new Float32Array(nout), d: new Float32Array(nout) });
+  }
+  return { L, sizes, t: 0 };
+}
+function forward(x, xo) {           // x[xo..] is the input; returns the output layer
+  let inp = x, io = xo;
+  net.L.forEach((ly, li) => {
+    const last = li === net.L.length - 1;
+    for (let j = 0; j < ly.nout; j++) {
+      let s = ly.b[j]; const row = j * ly.nin;
+      for (let i = 0; i < ly.nin; i++) s += ly.W[row + i] * inp[io + i];
+      ly.z[j] = s; ly.a[j] = last ? 1 / (1 + Math.exp(-s)) : (s > 0 ? s : 0);   // ReLU inside, sigmoid out
+    }
+    inp = ly.a; io = 0;
+  });
+  return net.L[net.L.length - 1].a;
+}
+function backward(x, xo, t, to) {   // add this sample's gradients; returns squared error
+  const Ls = net.L, out = Ls[Ls.length - 1];
+  let err = 0;
+  for (let j = 0; j < out.nout; j++) { const e = out.a[j] - t[to + j]; err += e * e; out.d[j] = e * out.a[j] * (1 - out.a[j]); }
+  for (let l = Ls.length - 1; l >= 0; l--) {
+    const ly = Ls[l], inp = l ? Ls[l - 1].a : x, io = l ? 0 : xo;
+    for (let j = 0; j < ly.nout; j++) {
+      const dj = ly.d[j], row = j * ly.nin; if (dj === 0) continue;
+      ly.gb[j] += dj;
+      for (let i = 0; i < ly.nin; i++) ly.gW[row + i] += dj * inp[io + i];
+    }
+    if (l) {
+      const prev = Ls[l - 1];
+      for (let i = 0; i < ly.nin; i++) {
+        let s = 0; for (let j = 0; j < ly.nout; j++) s += ly.W[j * ly.nin + i] * ly.d[j];
+        prev.d[i] = prev.z[i] > 0 ? s : 0;
+      }
+    }
+  }
+  return err;
+}
+function adam(batch, lr = 0.004) {
+  net.t++;
+  const b1 = 0.9, b2 = 0.999, c1 = 1 - b1 ** net.t, c2 = 1 - b2 ** net.t;
+  for (const ly of net.L) for (const [P, G, M, V] of [[ly.W, ly.gW, ly.mW, ly.vW], [ly.b, ly.gb, ly.mb, ly.vb]])
+    for (let i = 0; i < P.length; i++) {
+      const g = G[i] / batch; G[i] = 0;
+      M[i] = b1 * M[i] + (1 - b1) * g; V[i] = b2 * V[i] + (1 - b2) * g * g;
+      P[i] -= lr * (M[i] / c1) / (Math.sqrt(V[i] / c2) + 1e-8);
+    }
+}
+function reset() { makeFeatures(); net = makeNet([NF, 64, 64, 3]); step = 0; lossAvg = 0.1; lossHist = []; }
+
+// ---------- drawing the results ----------
+const oCv = document.getElementById('out'), oCtx = oCv.getContext('2d'), oImg = oCtx.createImageData(S, S);
+const nCv = document.getElementById('neurons'), nCtx = nCv.getContext('2d');
+let renderRow = 0;
+function renderSome(rows) {        // repaint a few rows of the network's picture each frame
+  for (let k = 0; k < rows; k++, renderRow = (renderRow + 1) % S)
+    for (let x = 0; x < S; x++) {
+      const i = renderRow * S + x, o = forward(feats, i * NF);
+      oImg.data[i * 4] = o[0] * 255; oImg.data[i * 4 + 1] = o[1] * 255; oImg.data[i * 4 + 2] = o[2] * 255; oImg.data[i * 4 + 3] = 255;
+    }
+  oCtx.putImageData(oImg, 0, 0);
+}
+function renderNeurons() {
+  const G = 24, tile = 32, img = nCtx.createImageData(256, 256), acts = new Float32Array(64 * G * G), f = new Float32Array(NF);
+  let mx = new Float32Array(64).fill(1e-6);
+  for (let py = 0; py < G; py++) for (let px = 0; px < G; px++) {
+    featuresAt(px / (G - 1) * 2 - 1, py / (G - 1) * 2 - 1, f, 0); forward(f, 0);
+    const a = net.L[1].a;
+    for (let n = 0; n < 64; n++) { acts[n * G * G + py * G + px] = a[n]; if (a[n] > mx[n]) mx[n] = a[n]; }
+  }
+  for (let n = 0; n < 64; n++) {
+    const ox = (n % 8) * tile, oy = ((n / 8) | 0) * tile;
+    for (let y = 0; y < tile - 2; y++) for (let x = 0; x < tile - 2; x++) {
+      const v = acts[n * G * G + ((y * G / (tile - 2)) | 0) * G + ((x * G / (tile - 2)) | 0)] / mx[n];
+      const j = ((oy + y) * 256 + ox + x) * 4;
+      img.data[j] = 30 + 225 * v ** 0.8; img.data[j + 1] = 40 + 170 * v; img.data[j + 2] = 90 + 60 * v; img.data[j + 3] = 255;
+    }
+  }
+  nCtx.putImageData(img, 0, 0);
+}
+const lCv = document.getElementById('loss'), lCtx = lCv.getContext('2d');
+function renderLoss() {
+  lCtx.clearRect(0, 0, 300, 50);
+  if (lossHist.length < 2) return;
+  const psnr = lossHist.map(l => 10 * Math.log10(1 / Math.max(l, 1e-6)));
+  lCtx.strokeStyle = '#ffcf6e'; lCtx.lineWidth = 2; lCtx.beginPath();
+  psnr.forEach((p, i) => lCtx.lineTo(i / (psnr.length - 1) * 300, 50 - Math.min(1, Math.max(0, (p - 8) / 28)) * 46 - 2));
+  lCtx.stroke();
+}
+
+// ---------- the training loop ----------
+const order = new Uint32Array(N).map((_, i) => i);
+let cursor = N, frameNo = 0;
+function train(ms) {
+  const t0 = performance.now(), BATCH = 32;
+  while (performance.now() - t0 < ms) {
+    let err = 0;
+    for (let k = 0; k < BATCH; k++) {
+      if (cursor >= N) { for (let i = N - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [order[i], order[j]] = [order[j], order[i]]; } cursor = 0; }
+      const i = order[cursor++];
+      forward(feats, i * NF); err += backward(feats, i * NF, targets, i * 3);
+    }
+    adam(BATCH); step++;
+    lossAvg = lossAvg * 0.98 + (err / BATCH / 3) * 0.02;
+  }
+}
+function loop() {
+  train(11); renderSome(6); frameNo++;
+  if (frameNo % 20 === 0) { lossHist.push(lossAvg); if (lossHist.length > 150) lossHist.shift(); renderLoss(); }
+  if (frameNo % 45 === 0) renderNeurons();
+  const psnr = 10 * Math.log10(1 / lossAvg);
+  document.getElementById('stats').innerHTML = `Training step <b>${step.toLocaleString()}</b> · seen <b>${(step * 32 / N).toFixed(1)}</b>× the picture · quality <b>${psnr.toFixed(1)} dB</b>`;
+  requestAnimationFrame(loop);
+}
+
+// ---------- UI ----------
+let current = 'Tree', brush = '#ffffff';
+const presets = document.getElementById('presets');
+for (const name of Object.keys(PICS)) {
+  const b = document.createElement('button'); b.textContent = name;
+  b.onclick = () => { current = name; tCtx.clearRect(0, 0, 256, 256); PICS[name](tCtx); refreshTargets(); mark(); };
+  presets.appendChild(b);
+}
+function mark() { [...presets.children].forEach(b => b.classList.toggle('on', b.textContent === current)); }
+const sw = document.getElementById('swatches');
+for (const c of ['#ffffff', '#e8232f', '#1f8a43', '#ffd34d', '#3aa0ff', '#111111']) {
+  const b = document.createElement('button'); b.className = 'sw'; b.style.background = c; b.title = 'Brush colour';
+  b.onclick = () => { brush = c; [...sw.children].forEach(x => x.classList.toggle('on', x === b)); };
+  sw.appendChild(b);
+}
+sw.firstChild.classList.add('on');
+let painting = false, lastP = null;
+function paint(e) {
+  const r = tCv.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 256, y = (e.clientY - r.top) / r.height * 256;
+  tCtx.strokeStyle = brush; tCtx.lineWidth = 14; tCtx.lineCap = 'round';
+  tCtx.beginPath(); tCtx.moveTo(...(lastP || [x, y])); tCtx.lineTo(x, y); tCtx.stroke();
+  lastP = [x, y]; refreshTargets();
+}
+tCv.addEventListener('pointerdown', e => { painting = true; lastP = null; tCv.setPointerCapture(e.pointerId); paint(e); current = ''; mark(); });
+tCv.addEventListener('pointermove', e => painting && paint(e));
+addEventListener('pointerup', () => painting = false);
+
+document.getElementById('fourier').onclick = e => {
+  fourier = !fourier; e.target.textContent = `Fourier features: ${fourier ? 'on' : 'off'}`; e.target.classList.toggle('on', fourier); reset();
+};
+document.getElementById('reset').onclick = reset;
+document.getElementById('hdbtn').onclick = () => {
+  // The network is a continuous function, so it can paint pixels it never trained on.
+  const hd = document.getElementById('hd'), c = document.getElementById('hdc'), g = c.getContext('2d'), M = 256, img = g.createImageData(M, M), f = new Float32Array(NF);
+  hd.style.display = 'flex';
+  let y = 0;
+  (function chunk() {
+    for (let k = 0; k < 16 && y < M; k++, y++) for (let x = 0; x < M; x++) {
+      featuresAt(x / (M - 1) * 2 - 1, y / (M - 1) * 2 - 1, f, 0); const o = forward(f, 0), j = (y * M + x) * 4;
+      img.data[j] = o[0] * 255; img.data[j + 1] = o[1] * 255; img.data[j + 2] = o[2] * 255; img.data[j + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    document.getElementById('hdinfo').textContent = y < M ? `Asking the network for ${M * M} pixels… ${Math.round(y / M * 100)}%` : `${M}×${M}: 16× more pixels than it ever trained on, and no pixel was copied.`;
+    if (y < M) requestAnimationFrame(chunk);
+  })();
+};
+document.getElementById('hdclose').onclick = () => document.getElementById('hd').style.display = 'none';
+
+PICS.Tree(tCtx); refreshTargets(); mark(); reset(); loop();
+</script>
+</body>
+</html>

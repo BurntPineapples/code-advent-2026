@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Day 23 · SLEIGH-OS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root { --fg:#45ff7a; --glow:#18ff5a66; --bgc:#04140a; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#000; }
+  .back { position:fixed; top:8px; left:8px; z-index:5; color:#fff9; text-decoration:none; font:14px system-ui,sans-serif; background:#0008; padding:6px 10px; border-radius:8px; }
+  #crt { position:fixed; inset:max(14px,3vmin); border-radius:28px; overflow:hidden;
+         background:radial-gradient(ellipse at 50% 45%, var(--bgc) 0%, #010402 95%);
+         box-shadow:inset 0 0 90px #000, inset 0 0 18px #000, 0 0 0 3px #161616, 0 0 0 14px #0b0b0b, 0 0 60px var(--glow); }
+  #crt::before { content:""; position:absolute; inset:0; pointer-events:none; z-index:3;
+                 background:repeating-linear-gradient(to bottom, rgba(0,0,0,.28) 0 1px, transparent 1px 3px); }
+  #crt::after { content:""; position:absolute; inset:0; pointer-events:none; z-index:3;
+                background:radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%);
+                animation:flicker 4s infinite steps(1); }
+  @keyframes flicker { 0%{opacity:1} 47%{opacity:.93} 48%{opacity:1} 80%{opacity:.97} 81%{opacity:1} }
+  #screen { position:absolute; inset:0; padding:28px 34px 34px; overflow-y:auto; scrollbar-width:none;
+            color:var(--fg); font:clamp(15px,2.3vmin,21px)/1.25 "VT323","Courier New",monospace;
+            text-shadow:0 0 3px var(--fg), 0 0 14px var(--glow); }
+  #screen::-webkit-scrollbar { display:none; }
+  .l { white-space:pre-wrap; word-break:break-word; min-height:1.25em; }
+  .dim { opacity:.6; } .err { color:#ff6a5a; text-shadow:0 0 6px #ff3b2a99; } .hi { color:#fff; text-shadow:0 0 6px var(--fg), 0 0 18px var(--glow); }
+  #line { display:flex; white-space:pre; }
+  #in { flex:1; background:transparent; border:0; outline:0; color:var(--fg); font:inherit; text-shadow:inherit; caret-color:var(--fg); padding:0; margin:0; }
+  #snowc { position:absolute; inset:0; pointer-events:none; z-index:2; }
+  #sleigh { position:absolute; left:100%; top:18%; margin:0; z-index:2; color:var(--fg); font:clamp(14px,2.2vmin,20px)/1.1 "VT323",monospace; text-shadow:0 0 4px var(--fg), 0 0 16px var(--glow); pointer-events:none; white-space:pre; }
+  .r { color:#ff5a5a; text-shadow:0 0 6px #ff2a2a; } .y { color:#ffe066; text-shadow:0 0 6px #ffcc00; } .b { color:#6ab8ff; text-shadow:0 0 6px #2a8cff; } .m { color:#ff7ad9; text-shadow:0 0 6px #ff2ac0; } .w { color:#fff; text-shadow:0 0 8px #fff; }
+  .g { color:#2fbf55; text-shadow:0 0 4px #1a8a3a; } .t { color:#a0703a; text-shadow:none; }
+</style>
+</head>
+<body>
+<a class="back" href="../../">← Calendar</a>
+<div id="crt">
+  <div id="screen"><div id="out"></div><div id="line"><span id="prompt"></span><input id="in" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="terminal input"></div></div>
+  <canvas id="snowc"></canvas>
+  <pre id="sleigh"></pre>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const outEl = $('out'), screenEl = $('screen'), inp = $('in');
+
+// ---------- output queue: lines appear one at a time, like a slow old terminal ----------
+const queue = []; let busy = false;
+function out(text = '', cls = '', delay = 14, html = false) { for (const line of String(text).split('\n')) queue.push({ line, cls, delay, html }); pump(); }
+let cur = null, timer = 0;
+function exec(job) {
+  if (job.fn) job.fn();
+  else {
+    const d = document.createElement('div'); d.className = 'l ' + job.cls;
+    job.html ? (d.innerHTML = job.line) : (d.textContent = job.line);
+    outEl.appendChild(d);
+    while (outEl.children.length > 600) outEl.firstChild.remove();
+  }
+  screenEl.scrollTop = screenEl.scrollHeight;
+}
+function pump() {
+  if (busy) return;
+  const job = queue.shift(); if (!job) return;
+  busy = true; cur = job;
+  timer = setTimeout(() => { cur = null; exec(job); busy = false; pump(); }, job.delay);
+}
+const later = (fn, delay = 0) => { queue.push({ fn, delay }); pump(); };
+function flush() {     // a key press skips the slow printing
+  busy = true;                       // keep pump() out while we drain the queue in order
+  if (cur) { clearTimeout(timer); const j = cur; cur = null; exec(j); }
+  while (queue.length) exec(queue.shift());
+  busy = false;
+}
+
+// ---------- sound ----------
+let ac = null, soundOn = true;
+function audio() { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); if (ac.state === 'suspended') ac.resume(); }
+function click() {
+  if (!soundOn || !ac) return;
+  const t = ac.currentTime, len = 0.012 * ac.sampleRate, b = ac.createBuffer(1, len, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 4;
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = b; f.type = 'bandpass'; f.frequency.value = 1800 + Math.random() * 1600; g.gain.value = 0.25;
+  s.connect(f); f.connect(g); g.connect(ac.destination); s.start(t);
+}
+function beep(f = 440, dur = 0.09, type = 'square', vol = 0.05, when = 0) {
+  if (!soundOn || !ac) return;
+  const t = ac.currentTime + when, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.value = f; o.connect(g); g.connect(ac.destination);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.start(t); o.stop(t + dur + 0.02);
+}
+const chime = notes => notes.forEach((f, i) => { beep(f, 0.5, 'sine', 0.08, i * 0.11); beep(f * 2.01, 0.25, 'sine', 0.03, i * 0.11); });
+
+// ---------- file system ----------
+const FS = {
+  home: { guest: {
+    'readme.txt': `Welcome to SLEIGH-OS, guest.
+
+This terminal is the North Pole mainframe. Please do not
+poke the Naughty List subsystem. (We know you're curious.)
+
+Things to try:   help   ls   play   tree   fortune`,
+    'todo.txt': `[x] wrap 4,000,000 socks
+[x] tune the sleigh bells (A = 440, obviously)
+[ ] find the Star
+[ ] find the Star!!
+[ ] seriously, who has the Star`,
+    '.elf_diary': `Dear diary. Today I wrapped a cat. Not on purpose.
+She seemed fine about it. I was less fine.`,
+  } },
+  workshop: {
+    'memo.txt': `TO:   all elves
+FROM: Head Elf
+RE:   the Star
+
+The Star for the Great Tree went missing after Comet's practice
+flight clipped the top branches. Last seen heading NORTH.
+Whoever finds it gets the good cocoa.
+
+Also: stop asking me for the wrapping-cupboard code.
+It's in the logs. It's ALWAYS in the logs.`,
+    'inventory.csv': `toy,count,status
+wooden train,120000,done
+rocking horse,45000,done
+kite,88000,tangled
+yo-yo,200000,going up and down
+snow globe,61000,shaken not stirred
+star (great tree),1,MISSING`,
+  },
+  logs: {
+    'sleigh.log': `21:00:03 PREFLIGHT  bells ............ ok
+21:00:04 PREFLIGHT  runners .......... waxed
+21:00:05 PREFLIGHT  reindeer ......... 8/8 present, trainee Pepper grounded
+21:02:11 TEST       altitude 300 m, speed 0.4 Mach-ho-ho
+21:02:47 WARN       Comet distracted by aurora
+21:02:48 ALERT      top of Great Tree clipped. Star detached. Heading: NORTH
+21:03:30 NOTE       Head Elf reset wrapping-cupboard combo to 4-1-7
+21:04:00 NOTE       Head Elf: "please stop reading the logs"`,
+    'cocoa.log': `cocoa consumed this week ...... 11,402 mugs
+marshmallow incidents ......... 3
+incident #3 .................. we don't talk about incident #3`,
+  },
+  secret: { 'vault.txt': null },
+};
+let cwd = ['home', 'guest'], vaultOpen = false;
+const pathStr = p => '/' + p.join('/');
+function resolve(arg) {
+  if (!arg) return cwd.slice();
+  let parts = arg.startsWith('/') ? [] : arg.startsWith('~') ? ['home', 'guest'] : cwd.slice();
+  for (const s of arg.replace(/^~/, '').split('/')) {
+    if (!s || s === '.') continue;
+    if (s === '..') parts.pop(); else parts.push(s);
+  }
+  return parts;
+}
+function node(parts) { let n = FS; for (const p of parts) { if (n && typeof n === 'object' && p in n) n = n[p]; else return undefined; } return n; }
+
+// ---------- eye candy ----------
+function banner() {
+  const F = {
+    S: [' ____  ', '/ ___| ', '\\___ \\ ', ' ___) |', '|____/ '],
+    L: [' _     ', '| |    ', '| |    ', '| |___ ', '|_____|'],
+    E: [' _____ ', '| ____|', '|  _|  ', '| |___ ', '|_____|'],
+    I: [' ___ ', '|_ _|', ' | | ', ' | | ', '|___|'],
+    G: ['  ____ ', ' / ___|', '| |  _ ', '| |_| |', ' \\____|'],
+    H: [' _   _ ', '| | | |', '| |_| |', '|  _  |', '|_| |_|'],
+    '-': ['      ', '      ', ' ____ ', '|____|', '      '],
+    O: ['  ___  ', ' / _ \\ ', '| | | |', '| |_| |', ' \\___/ '],
+  };
+  return [0, 1, 2, 3, 4].map(r => [...'SLEIGH-OS'].map(c => F[c][r]).join('')).join('\n');
+}
+function treeLines(lit) {
+  const rows = 11, lines = [];
+  const cols = ['r', 'y', 'b', 'm', 'w'];
+  lines.push(' '.repeat(rows) + '<span class="y">★</span>');
+  for (let i = 1; i < rows; i++) {
+    let s = ' '.repeat(rows - i) + '<span class="g">/</span>';
+    for (let k = 0; k < 2 * i - 1; k++) {
+      const h = (i * 31 + k * 17) % 9;
+      if (h === 0 || h === 4) s += lit ? `<span class="${cols[(i + k + lit) % cols.length]}">o</span>` : '<span class="g">o</span>';
+      else if ((i + k) % 4 === 0) s += '<span class="y">~</span>';
+      else s += `<span class="g">${"*'.^"[(i * 7 + k * 3) % 4]}</span>`;
+    }
+    lines.push(s + '<span class="g">\\</span>');
+  }
+  lines.push(' '.repeat(rows - 2) + '<span class="t">[___]</span>');
+  return lines;
+}
+function animateTree(msgAfter) {
+  const pre = document.createElement('div'); pre.className = 'l';
+  later(() => { outEl.appendChild(pre); screenEl.scrollTop = screenEl.scrollHeight; });
+  let k = 0;
+  later(() => {
+    const iv = setInterval(() => {
+      pre.innerHTML = treeLines(++k).join('\n');
+      if (k % 3 === 0) beep([523, 659, 784, 1046][k % 4], 0.12, 'sine', 0.03);
+      if (k > 24) { clearInterval(iv); if (msgAfter) out(msgAfter, 'hi'); prompt(); }
+    }, 220);
+    pre.innerHTML = treeLines(0).join('\n'); screenEl.scrollTop = screenEl.scrollHeight;
+  });
+}
+let snowTimer = null;
+function letItSnow(sec = 10) {
+  const c = $('snowc'), x = c.getContext('2d'), r = $('crt').getBoundingClientRect();
+  c.width = r.width; c.height = r.height;
+  const col = getComputedStyle(document.documentElement).getPropertyValue('--fg').trim();
+  const fl = Array.from({ length: 140 }, () => ({ x: Math.random() * c.width, y: Math.random() * -c.height, v: 30 + Math.random() * 60, ch: '*.+'[(Math.random() * 3) | 0], p: Math.random() * 6 }));
+  const t0 = performance.now(); let last = t0;
+  cancelAnimationFrame(snowTimer);
+  (function f(now) {
+    const dt = (now - last) / 1000; last = now;
+    x.clearRect(0, 0, c.width, c.height);
+    x.font = '20px VT323, monospace'; x.fillStyle = col; x.shadowColor = col; x.shadowBlur = 8;
+    const ending = now - t0 > sec * 1000;
+    let alive = 0;
+    for (const s of fl) {
+      s.y += s.v * dt; s.x += Math.sin(now / 700 + s.p) * 0.4;
+      if (s.y > c.height && !ending) { s.y = -10; s.x = Math.random() * c.width; }
+      if (s.y <= c.height) { alive++; x.fillText(s.ch, s.x, s.y); }
+    }
+    if (alive) snowTimer = requestAnimationFrame(f); else x.clearRect(0, 0, c.width, c.height);
+  })(t0);
+}
+function sleigh() {
+  const s = $('sleigh');
+  s.textContent =
+`        ,/\\,     ,/\\,     ,/\\,
+  *  . (o o)~~~~(o o)~~~~(o o)~~~~,__________.
+ .  *  / ^ \\    / ^ \\    / ^ \\    \\  [_][_]  \\
+   *   |/ \\|    |/ \\|    |/ \\|     \\_________/
+                                  ~~'~~~~~~~'~~`;
+  s.style.transition = 'none'; s.style.left = '100%';
+  void s.offsetWidth;
+  s.style.transition = 'left 7s linear'; s.style.left = '-80%';
+  for (let i = 0; i < 14; i++) beep(i % 2 ? 1568 : 1319, 0.08, 'triangle', 0.03, i * 0.18);
+}
+
+// ---------- the shell ----------
+const FORTUNES = [
+  'What do you call a snowman with a six-pack? An abdominal snowman.',
+  'Why did the gingerbread man go to the doctor? He was feeling crummy.',
+  'What do elves learn at school? The elf-abet.',
+  'Why are Christmas trees bad at knitting? They keep dropping their needles.',
+  'What do you get if you cross a bell with a skunk? Jingle smells.',
+  'How does a snowman get to work? By icicle.',
+  'What is a reindeer\'s favourite game? Stable tennis.',
+  'Why was the snowman looking through the carrots? He was picking his nose.',
+  'What do you call an old snowman? Water.',
+  'Your lucky number is 25. It always has been. It will be again next year.',
+];
+const VERDICTS = ['NICE', 'NICE (just barely)', 'NICE, with a gold star', 'UNDER REVIEW (keep it up)', 'NAUGHTY (but there is still time)', 'NICE. Suspiciously nice.'];
+const hist = []; let hix = 0, mode = 'shell';
+const PS = () => mode === 'adv' ? '> ' : `guest@northpole:${pathStr(cwd).replace('/home/guest', '~') || '/'}$ `;
+function prompt() { later(() => { $('prompt').textContent = PS(); $('line').style.visibility = 'visible'; inp.focus(); screenEl.scrollTop = screenEl.scrollHeight; }); }
+
+const CMDS = {
+  help() {
+    out(`  help                  this list
+  ls [-a] [dir]         list files        cd <dir>    change directory
+  cat <file>            read a file       pwd         where am I?
+  play                  start the adventure "The Missing Star"
+  tree   snow   sleigh  eye candy
+  fortune               a cracker joke
+  say <text>            a reindeer says it
+  naughty <name>        consult the List
+  date                  how long until Christmas?
+  color <green|amber|ice|candy>
+  unlock <password>     open the vault
+  clear  history  sound  reboot`);
+  },
+  ls(args) {
+    const all = args.includes('-a'), target = args.find(a => a !== '-a');
+    const n = node(resolve(target));
+    if (n === undefined) return out(`ls: ${target}: no such file or directory`, 'err');
+    if (typeof n !== 'object' || n === null) return out(target);
+    const names = Object.keys(n).filter(k => all || !k.startsWith('.')).map(k => (n[k] && typeof n[k] === 'object') ? k + '/' : k);
+    out(names.join('    ') || '(empty)');
+  },
+  cd(args) {
+    const p = resolve(args[0] || '~'), n = node(p);
+    if (n === undefined) return out(`cd: ${args[0]}: no such directory`, 'err');
+    if (typeof n !== 'object' || n === null) return out(`cd: ${args[0]}: not a directory`, 'err');
+    if (p[0] === 'secret' && !vaultOpen) return out('cd: secret: permission denied. (Nice try.)', 'err');
+    cwd = p;
+  },
+  pwd() { out(pathStr(cwd)); },
+  cat(args) {
+    if (!args[0]) return out('cat: which file? (try ls)', 'err');
+    const p = resolve(args[0]), n = node(p);
+    if (p.join('/') === 'secret/vault.txt') {
+      if (!vaultOpen) { beep(220, 0.25); return out('cat: vault.txt: permission denied. The vault needs a password: unlock <password>', 'err'); }
+      return vault();
+    }
+    if (n === undefined) return out(`cat: ${args[0]}: no such file`, 'err');
+    if (typeof n === 'object') return out(`cat: ${args[0]}: is a directory`, 'err');
+    out(n);
+  },
+  clear() { queue.length = 0; outEl.innerHTML = ''; },
+  history() { hist.forEach((h, i) => out(`${String(i + 1).padStart(4)}  ${h}`)); },
+  whoami() { out('guest (temporary elf, probationary)'); },
+  date() {
+    const now = new Date(), y = now.getMonth() === 11 && now.getDate() > 25 ? now.getFullYear() + 1 : now.getFullYear();
+    const x = new Date(y, 11, 25), d = Math.ceil((x - now) / 864e5);
+    out(now.toString().slice(0, 24));
+    out(d > 0 ? `${d} sleep${d === 1 ? '' : 's'} until Christmas.` : 'It is Christmas Day! The sleigh is out.', 'hi');
+  },
+  echo(args, raw) { out(raw); },
+  tree() { animateTree(); return 'async'; },
+  snow() { letItSnow(10); out('Let it snow. (It stops on its own.)', 'dim'); },
+  sleigh() { sleigh(); out('Did you hear bells?', 'dim'); },
+  fortune() { out(FORTUNES[(Math.random() * FORTUNES.length) | 0]); },
+  say(args, raw) {
+    const t = raw || 'Merry Christmas!';
+    const w = Math.min(44, t.length), lines = t.match(new RegExp(`.{1,${w}}(\\s|$)|\\S+`, 'g')).map(s => s.trim());
+    const W = Math.max(...lines.map(l => l.length));
+    out(' ' + '_'.repeat(W + 2));
+    lines.forEach((l, i) => out((lines.length === 1 ? '< ' : i === 0 ? '/ ' : i === lines.length - 1 ? '\\ ' : '| ') + l.padEnd(W) + (lines.length === 1 ? ' >' : i === 0 ? ' \\' : i === lines.length - 1 ? ' /' : ' |')));
+    out(' ' + '-'.repeat(W + 2));
+    out(`      \\    \\|/  \\|/
+       \\    \\\\__//
+            (o  o)____
+             \\__/     )~
+              || ---- |
+              ||     ||`);
+  },
+  naughty(args, raw) {
+    if (!raw) return out('naughty: whose name? e.g. naughty Jo', 'err');
+    let h = 2166136261; for (const c of raw.toLowerCase()) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+    out(`Consulting the List for "${raw}"`, '', 20);
+    for (let i = 0; i < 3; i++) out('.', 'dim', 380);
+    out(`VERDICT: ${VERDICTS[(h >>> 0) % VERDICTS.length]}`, 'hi', 300);
+  },
+  color(args) {
+    const T = { green: ['#45ff7a', '#18ff5a66', '#04140a'], amber: ['#ffb43a', '#ff8a0066', '#140c02'], ice: ['#a6ecff', '#3ac8ff66', '#020c14'], candy: ['#ff6b8a', '#ff2a5066', '#140308'] };
+    const t = T[args[0]];
+    if (!t) return out('color: pick one of green, amber, ice, candy', 'err');
+    const s = document.documentElement.style; s.setProperty('--fg', t[0]); s.setProperty('--glow', t[1]); s.setProperty('--bgc', t[2]);
+  },
+  sound() { soundOn = !soundOn; out(`sound ${soundOn ? 'on' : 'off'}`); },
+  unlock(args) {
+    if (!args[0]) return out('unlock: password? (Somebody at the North Pole knows it.)', 'err');
+    if (args[0].toLowerCase() === 'evergreen') {
+      vaultOpen = true; chime([523, 659, 784, 1046]);
+      out('ACCESS GRANTED', 'hi', 200); out('Try: cat /secret/vault.txt', 'dim');
+    } else { beep(180, 0.3); out('ACCESS DENIED. That attempt has been noted on the List.', 'err', 200); }
+  },
+  sudo() { beep(180, 0.3); out('guest is not in the sudoers file. This incident will be reported to the Naughty List.', 'err'); },
+  rm() { out('rm: the elves have hidden all the sharp tools from you.', 'err'); },
+  exit() { out('There is no leaving the North Pole. Have some cocoa instead.'); },
+  logout() { CMDS.exit(); },
+  reboot() { outEl.innerHTML = ''; queue.length = 0; boot(); return 'async'; },
+  play() {
+    mode = 'adv';
+    if (!A.started) { A.started = true; out('THE MISSING STAR', 'hi', 120); out('a very small text adventure. Type help for commands, quit to leave.\n', 'dim', 60); advLook(); }
+    else { out('(Welcome back. Your progress was saved.)', 'dim'); advLook(); }
+  },
+};
+CMDS.adventure = CMDS.play;
+
+function run(line) {
+  const raw = line.trim();
+  out(PS() + line, 'dim', 0);
+  if (!raw) return prompt();
+  hist.push(raw); hix = hist.length;
+  if (mode === 'adv') { if (adv(raw.toLowerCase()) !== 'async') prompt(); return; }
+  const [cmd, ...args] = raw.split(/\s+/);
+  const f = CMDS[cmd.toLowerCase()];
+  if (!f) { beep(220, 0.12); out(`${cmd}: command not found. Type help.`, 'err'); return prompt(); }
+  if (f(args, raw.slice(cmd.length).trim()) !== 'async') prompt();
+}
+
+function vault() {
+  chime([784, 988, 1175, 1568]);
+  out(`
+                   .
+                  /|\\
+        .________/ | \\________.
+         \\__     YOU     __/
+            \\__ FOUND __/
+              /  THE  \\
+             /  STAR!  \\
+            /__/     \\__\\
+`, 'hi', 30);
+  out(`You put the Star back and saved Christmas Eve at the North Pole.
+The elves have voted you an honorary member of the Workshop
+(probationary, cocoa privileges included).
+
+Two doors left on the calendar. The last one is the big one.
+                                          - the Head Elf`, '', 40);
+}
+
+// ---------- the text adventure ----------
+const A = { started: false, room: 'workshop', inv: new Set(), cupboard: false, lantern: false, thermos: false, melted: false, pepper: false, pip: false, won: false, moves: 0 };
+const ITEMS = {
+  carrot:  { loc: 'kitchen', name: 'a carrot', desc: 'A fat orange carrot. Reindeer go wild for these.' },
+  thermos: { loc: 'kitchen', name: 'a thermos', desc: () => A.thermos ? 'The thermos is full of steaming hot cocoa.' : 'A battered tartan thermos. It is empty.' },
+  cookie:  { loc: 'kitchen', name: 'a gingerbread cookie', desc: 'A gingerbread cookie with a slightly smug icing face.' },
+  lantern: { loc: null, name: 'a lantern', desc: () => A.lantern ? 'The lantern glows a warm gold.' : 'A brass lantern with a little switch. It is off.' },
+  star:    { loc: null, name: 'the Star', desc: 'The Star of the Great Tree: gold, five-pointed, and humming faintly with Christmas.' },
+};
+const ROOMS = {
+  workshop: { name: 'Workshop Floor', exits: { n: 'yard', e: 'wrapping', w: 'kitchen' },
+    desc: () => `Conveyor belts hum, and half-built toys wait in neat rows. A sign above the door reads 2 SLEEPS TO GO.${A.won ? ' Pip is dancing on a crate.' : ' Pip, the youngest elf, sits on a crate looking miserable.'}\nExits: north to the Yard, east to the Wrapping Room, west to the Kitchen.` },
+  kitchen: { name: 'Kitchen', exits: { e: 'workshop' },
+    desc: () => `It smells of ginger and burnt sugar. A pot of cocoa bubbles on the stove.\nExit: east.` },
+  wrapping: { name: 'Wrapping Room', exits: { w: 'workshop' },
+    desc: () => `A blizzard of paper and ribbon. In the corner stands a steel cupboard ${A.cupboard ? 'with its door hanging open.' : 'with a three-digit combination lock.'}\nExit: west.` },
+  yard: { name: 'The Yard', exits: { s: 'workshop', n: 'lake', e: 'stables', w: 'tree' },
+    desc: () => `Snow crunches underfoot and the sky is full of stars, but not the one that matters. To the west the Great Tree towers over the square${A.won ? ', its Star blazing' : ', dark at the top'}.\nExits: north to the frozen lake, east to the stables, west to the Great Tree, south back inside.` },
+  stables: { name: 'Stables', exits: { w: 'yard' },
+    desc: () => `Warm, dim, and smelling of hay. Most stalls are empty, since the team is out on a test flight.${A.pepper ? '' : ' In the last stall, a young reindeer named Pepper eyes you hopefully.'}\nExit: west.` },
+  lake: { name: 'Frozen Lake', exits: { s: 'yard', n: 'cave' },
+    desc: () => `The ice glitters under the moon. On the far shore a cave mouth breathes cold air${A.lantern ? '.' : '. It is pitch black inside.'}\nExits: north into the cave, south to the Yard.` },
+  cave: { name: 'Ice Cave', exits: { s: 'lake' },
+    desc: () => A.melted ? `Your lantern turns the walls to blue glass. A puddle steams where the big icicle used to be.\nExit: south.`
+                         : `Your lantern turns the walls to blue glass. High above, frozen inside a huge icicle, something golden glows. The Star!\nExit: south.` },
+  tree: { name: 'The Great Tree', exits: { e: 'yard' },
+    desc: () => A.won ? `The Great Tree glows from root to tip, and the Star sits on top where it belongs.\nExit: east.`
+                      : `Taller than the workshop, every branch decorated, but the very top is bare. You could never climb it.\nExit: east.` },
+};
+const DIRS = { n: 'n', north: 'n', s: 's', south: 's', e: 'e', east: 'e', w: 'w', west: 'w' };
+const here = () => Object.keys(ITEMS).filter(k => ITEMS[k].loc === A.room);
+function advLook() {
+  const r = ROOMS[A.room];
+  out(r.name.toUpperCase(), 'hi', 40);
+  out(r.desc(), '', 25);
+  const items = here();
+  if (items.length) out('You can see ' + items.map(k => ITEMS[k].name).join(', ') + '.', '', 25);
+  if (A.pepper && A.room !== 'stables') out('Pepper trots along beside you.', 'dim', 25);
+}
+function noun(words) {
+  const s = words.join(' ');
+  for (const k of Object.keys(ITEMS)) if (s.includes(k)) return k;
+  if (/cocoa/.test(s)) return 'cocoa';
+  if (/pepper|reindeer/.test(s)) return 'pepper';
+  if (/pip|elf/.test(s)) return 'pip';
+  if (/cupboard|lock/.test(s)) return 'cupboard';
+  if (/tree/.test(s)) return 'tree';
+  if (/icicle|ice/.test(s)) return 'icicle';
+  return words[0];
+}
+function adv(cmd) {
+  A.moves++;
+  const words = cmd.replace(/\b(the|a|an|to|at|on|with|up|into)\b/g, ' ').split(/\s+/).filter(Boolean);
+  let [v, ...rest] = words;
+  if (!v) return;
+  if (v === 'go' || v === 'walk') { v = rest[0]; rest = rest.slice(1); }
+  if (cmd.startsWith('enter cave')) v = 'n';
+  const d = DIRS[v];
+  if (d) {
+    const to = ROOMS[A.room].exits[d];
+    if (!to) return out("You can't go that way.");
+    if (to === 'cave' && !A.lantern) return out("It's far too dark in there. You'd walk face-first into an icicle.");
+    A.room = to; return advLook();
+  }
+  const n = noun(rest), has = k => A.inv.has(k);
+  switch (v) {
+    case 'l': case 'look': return rest.length ? examine(n) : advLook();
+    case 'x': case 'examine': case 'read': case 'inspect': return examine(n);
+    case 'i': case 'inv': case 'inventory':
+      return out(A.inv.size ? 'You are carrying ' + [...A.inv].map(k => ITEMS[k].name).join(', ') + '.' : 'You are carrying nothing but Christmas spirit.');
+    case 'take': case 'get': case 'grab': case 'pick':
+      if (n === 'cocoa') return out(has('thermos') ? 'Try: fill thermos' : "It's boiling hot. You'd need something to carry it in.");
+      if (ITEMS[n] && ITEMS[n].loc === A.room) { ITEMS[n].loc = null; A.inv.add(n); click(); return out(`Taken: ${ITEMS[n].name}.`); }
+      if (n === 'star' && A.room === 'cave' && !A.melted) return out("It's frozen inside the icicle, far out of reach.");
+      if (n === 'pepper') return out('Pepper is a reindeer, not a handbag.');
+      return out("You don't see that here.");
+    case 'drop':
+      if (ITEMS[n] && has(n)) { A.inv.delete(n); ITEMS[n].loc = A.room; return out('Dropped.'); }
+      return out("You aren't carrying that.");
+    case 'open': case 'unlock':
+      if (A.room !== 'wrapping' || n !== 'cupboard') return out("There's nothing like that to open here.");
+      if (A.cupboard) return out("It's already open.");
+      { const code = cmd.match(/\d{3}/); if (code) return dial(code[0]); }
+      return out('The lock has three little wheels of digits. Try: dial 123');
+    case 'dial': case 'enter': case 'code': case 'type': case 'combo': case 'combination': {
+      const code = cmd.replace(/\D/g, '');
+      if (A.room !== 'wrapping') return out('There is nothing to dial here.');
+      return dial(code);
+    }
+    case 'light': case 'switch': case 'turn': case 'use':
+      if (n === 'lantern' || (v === 'turn' && rest.includes('lantern'))) {
+        if (!has('lantern')) return out("You don't have a lantern.");
+        if (A.lantern) return out("It's already on.");
+        A.lantern = true; beep(880, 0.08, 'sine', 0.05); return out('Click. The lantern blooms with warm golden light.');
+      }
+      if (n === 'thermos' || n === 'cocoa') return pour();
+      if (n === 'carrot') return feed();
+      return out("You're not sure how to use that.");
+    case 'fill':
+      if (!has('thermos')) return out('Fill what with what?');
+      if (A.room !== 'kitchen') return out('There is nothing here to fill it with.');
+      if (A.thermos) return out("It's already full.");
+      A.thermos = true; return out('You ladle hot cocoa into the thermos and screw the lid on tight. Steam escapes in little puffs.');
+    case 'pour': case 'tip': case 'splash': case 'throw': return pour();
+    case 'drink': case 'sip':
+      if (has('thermos') && A.thermos) { A.thermos = false; return out('Delicious. Also: now the thermos is empty. Hmm.'); }
+      if (A.room === 'kitchen') return out("It's boiling. You'd need to let it cool first, or put it in something.");
+      return out('You have nothing to drink.');
+    case 'eat':
+      if (n === 'cookie' && has('cookie')) { A.inv.delete('cookie'); return out('The gingerbread man looks betrayed. It is, however, delicious.'); }
+      if (n === 'carrot' && has('carrot')) return out("You think of Pepper's hopeful face and can't bring yourself to.");
+      return out("You can't eat that.");
+    case 'feed': case 'give': case 'offer':
+      if (n === 'cookie' || (rest.includes('cookie'))) return giveCookie();
+      if (rest.includes('pip')) return has('cookie') ? giveCookie() : out('You have nothing Pip would want. Elves like baked things.');
+      return feed();
+    case 'talk': case 'ask': case 'speak': case 'hint': case 'chat':
+      if (v === 'hint' || n === 'pip' || rest.includes('pip')) return pipTalk(v === 'hint');
+      if (n === 'pepper') return out(A.pepper || A.room === 'stables' ? 'Pepper snorts, which is reindeer for "I am listening, but I would listen better with a carrot."' : 'Pepper is not here.');
+      return out('Nobody answers.');
+    case 'climb':
+      if (A.room === 'tree') return out('The lowest branch is twice your height and covered in tinsel. Something that can fly could get you up there.');
+      return out('Nothing worth climbing here.');
+    case 'ride': case 'fly': case 'mount':
+      if (!A.pepper) return out(A.room === 'stables' ? 'Pepper backs away. You two need to become friends first.' : 'Ride what?');
+      if (A.room !== 'tree') return out('Pepper paws the snow, ready to fly. But where to? Not here.');
+      if (!has('star')) return out('You soar round the top of the Great Tree... with nothing to put on it. Pepper lands, looking puzzled.');
+      return win();
+    case 'put': case 'place': case 'hang':
+      if (n === 'star' && has('star')) return out(A.room === 'tree' ? (A.pepper ? 'The top is way out of reach. If only you could fly. Pepper looks at you meaningfully.' : 'The top is way out of reach. You could never climb that high.') : 'This is not where the Star belongs.');
+      return out('Put what where?');
+    case 'help':
+      return out('Try: look, n/s/e/w, take, drop, examine, inventory, open, dial, light, fill, pour, give, feed, talk, ride, hint, quit.', 'dim');
+    case 'score':
+      return out(`Score: ${[A.cupboard, A.lantern, A.melted, A.pepper, A.won].filter(Boolean).length * 20} / 100, in ${A.moves} moves.`);
+    case 'quit': case 'exit': case 'q':
+      mode = 'shell'; return out('(Back to the terminal. Your progress is saved. Type play to return.)', 'dim');
+    case 'xyzzy': return out('A hollow voice says "Wrong game."');
+    case 'jump': return out('Whee.');
+    case 'sing': return out('You sing a carol. Somewhere, a reindeer hums along.');
+    default: return out("I don't understand that. (Type help.)");
+  }
+}
+function examine(n) {
+  if (ITEMS[n] && (A.inv.has(n) || ITEMS[n].loc === A.room)) { const d = ITEMS[n].desc; return out(typeof d === 'function' ? d() : d); }
+  if (n === 'pip' && A.room === 'workshop') return out('Pip has tinsel in her hair and tears frozen on her cheeks. Maybe talk to her.');
+  if (n === 'pepper' && (A.room === 'stables' || A.pepper)) return out('A gangly young reindeer with a white blaze on her nose. Grounded, according to the logs, but those legs look ready.');
+  if (n === 'cupboard' && A.room === 'wrapping') return out(A.cupboard ? 'The cupboard is open.' : 'Steel, sturdy, locked. Three digit wheels. The Head Elf changes the combination often.');
+  if (n === 'cocoa' && A.room === 'kitchen') return out('Rich, dark, and far too hot to drink. Thick enough to melt a glacier.');
+  if (n === 'tree' && (A.room === 'tree' || A.room === 'yard')) return out(A.won ? 'Perfect.' : 'Magnificent, but the top is bare. It needs its Star.');
+  if (n === 'icicle' && A.room === 'cave') return out(A.melted ? 'Just a steaming puddle now.' : 'A huge icicle hangs from the roof with the Star frozen inside. Something hot might loosen it.');
+  return out('You see nothing special.');
+}
+function dial(code) {
+  if (A.cupboard) return out("It's already open.");
+  if (code === '417') { A.cupboard = true; ITEMS.lantern.loc = 'wrapping'; chime([659, 784]); return out('Click... click... CLUNK. The cupboard swings open. Inside, behind a mountain of tape, is a lantern.'); }
+  beep(200, 0.2); return out(code ? `You dial ${code}. Nothing happens. (Who would know the code? The Head Elf logs everything...)` : 'Dial what? e.g. dial 123');
+}
+function pour() {
+  if (!A.inv.has('thermos')) return out('You have nothing to pour.');
+  if (!A.thermos) return out('The thermos is empty.');
+  if (A.room !== 'cave') { A.thermos = false; return out('You pour hot cocoa on the ground. The snow looks delighted. You do not. The thermos is empty.'); }
+  if (A.melted) return out('There is no more ice worth melting.');
+  A.thermos = false; A.melted = true; ITEMS.star.loc = 'cave'; chime([1046, 1318, 1568]);
+  return out('You fling the hot cocoa at the base of the icicle. It hisses, cracks, and drops into the snow with a soft WHUMP. The Star lies glowing at your feet.');
+}
+function feed() {
+  if (A.room !== 'stables' && !A.pepper) return out("There's no one here to feed.");
+  if (A.pepper) return out('Pepper is already your best friend.');
+  if (!A.inv.has('carrot')) return out('Pepper sniffs your empty hands, then sighs.');
+  A.inv.delete('carrot'); A.pepper = true; chime([784, 988]);
+  return out('Pepper crunches the carrot in two bites, then nuzzles you so hard you nearly fall over. She steps out of her stall. She is coming with you, whether you like it or not.');
+}
+function giveCookie() {
+  if (A.room !== 'workshop') return out('Pip is in the workshop.');
+  if (!A.inv.has('cookie')) return out("You don't have anything Pip would like.");
+  A.inv.delete('cookie'); A.pip = true;
+  out('Pip takes the cookie and brightens immediately. "Ooh, thank you!"');
+  return pipTalk(false);
+}
+function pipTalk(isHint) {
+  if (A.room !== 'workshop' && !isHint) return out('Pip is back in the workshop.');
+  const who = A.room === 'workshop' ? 'Pip says: ' : '(A little voice in your head that sounds like Pip): ';
+  let s;
+  if (A.won) s = 'You did it! The password for the mainframe vault is EVERGREEN. Do not tell the Head Elf I told you.';
+  else if (!A.cupboard) s = '"The Star went NORTH, over the frozen lake, after Comet clipped the tree. It\'s dark up there. There\'s a lantern in the wrapping cupboard, but the Head Elf keeps changing the code. He logs everything on the mainframe. Type quit, then look in the logs!"';
+  else if (!A.lantern) s = '"You\'ve got the lantern? Then switch it on!"';
+  else if (!A.melted) s = '"If the Star is stuck in ice, you need something hot. Really hot. The kitchen cocoa could strip paint."';
+  else if (!A.inv.has('star')) s = '"Did you pick up the Star?"';
+  else if (!A.pepper) s = '"The tree is far too tall to climb. But Pepper can fly, even if she\'s officially grounded. She\'ll do anything for a carrot."';
+  else s = '"Take Pepper to the Great Tree, then ride her up!"';
+  out(who + s);
+}
+function win() {
+  A.won = true; A.inv.delete('star');
+  out('You climb onto Pepper. She crouches, springs, and suddenly the Yard is far below. You circle the Great Tree once, twice, and on the third pass you lean out and set the Star on the very top.', '', 40);
+  out('For a moment, nothing. Then every light on the tree comes on at once.', 'hi', 600);
+  animateTree('\nTHE STAR IS HOME. *** You win! ***\nPip shouts up from below: "The vault password is EVERGREEN!"\nType quit, then: unlock evergreen');
+  chime([523, 659, 784, 1046, 1318]);
+  return 'async';
+}
+
+// ---------- input ----------
+inp.addEventListener('keydown', e => {
+  audio();
+  if (queue.length) flush();
+  if (e.key === 'Enter') {
+    const v = inp.value; inp.value = '';
+    $('line').style.visibility = 'hidden';
+    run(v); e.preventDefault();
+  } else if (e.key === 'ArrowUp') { if (hix > 0) inp.value = hist[--hix]; e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { inp.value = hix < hist.length - 1 ? hist[++hix] : (hix = hist.length, ''); e.preventDefault(); }
+  else if (e.key === 'Tab') {
+    e.preventDefault();
+    const parts = inp.value.split(' '), last = parts[parts.length - 1];
+    let pool;
+    if (parts.length === 1 && mode === 'shell') pool = Object.keys(CMDS);
+    else { const dir = last.includes('/') ? last.slice(0, last.lastIndexOf('/') + 1) : ''; const n = node(resolve(dir || '.')); pool = n && typeof n === 'object' ? Object.keys(n).map(k => dir + k + (n[k] && typeof n[k] === 'object' ? '/' : '')) : []; }
+    const m = pool.filter(p => p.startsWith(last));
+    if (m.length === 1) { parts[parts.length - 1] = m[0]; inp.value = parts.join(' '); }
+    else if (m.length > 1) { out(PS() + inp.value, 'dim', 0); out(m.join('    '), '', 0); }
+  } else if (e.key === 'l' && e.ctrlKey) { e.preventDefault(); CMDS.clear(); }
+  else if (e.key.length === 1) click();
+});
+document.addEventListener('pointerup', () => { if (!getSelection().toString()) inp.focus(); });
+
+// ---------- boot ----------
+function boot() {
+  $('line').style.visibility = 'hidden';
+  out('NORTHPOLE BIOS v12.25   (c) Workshop Systems', 'hi', 300);
+  out('CPU: Gingerbread 8086 @ 4.77 MHz ......... ok', '', 220);
+  out('Memory test: 640K ........................ ok', '', 380);
+  out('Detecting peripherals:', '', 200);
+  out('  sleigh bells (8) .................... ok', '', 160);
+  out('  chimney radar ....................... ok', '', 160);
+  out('  cocoa level sensor .................. 11%  (low!)', '', 200);
+  out('  naughty/nice subsystem .............. LOCKED', '', 200);
+  out('', '', 100);
+  let bar = null;
+  later(() => { bar = document.createElement('div'); bar.className = 'l'; outEl.appendChild(bar); }, 200);
+  for (let i = 0; i <= 24; i++) later(() => { bar.textContent = 'Loading SLEIGH-OS [' + '#'.repeat(i) + ' '.repeat(24 - i) + '] ' + Math.round(i / 24 * 100) + '%'; if (i % 4 === 0) click(); }, 45 + Math.random() * 60);
+  out('', '', 300);
+  out(banner(), 'hi', 30);
+  out('', '', 100);
+  out('northpole login: guest', '', 500);
+  out('Last login: Dec 24 1987 on tty1 (from the chimney)', 'dim', 300);
+  out("\nWelcome, guest. Type help to see what this old machine can do,\nor play if you're feeling brave. Something's gone missing tonight.\n", '', 200);
+  later(() => beep(988, 0.12, 'sine', 0.05));
+  prompt();
+}
+boot();
+</script>
+</body>
+</html>
