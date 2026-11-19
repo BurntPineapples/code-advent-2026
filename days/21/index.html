@@ -20,7 +20,7 @@
   .bar button.on { background:#ffd88a; color:#1a1200; }
   .bar label { display:flex; gap:6px; align-items:center; }
   .bar input { width:80px; }
-  @media (max-width:640px) { #chart { display:none !important; } }
+  @media (max-width:640px) { #chart { display:none !important; } #hud { top:48px; } #stats { font-size:12px; } #msg { font-size:13px; } }
 </style>
 </head>
 <body>
@@ -32,6 +32,7 @@
   <button id="newv">New village</button>
   <select id="count" title="Houses"><option value="30">30 houses</option><option value="60" selected>60 houses</option><option value="120">120 houses</option><option value="250">250 houses</option></select>
   <button id="draw">✏ Draw your own</button>
+  <button id="undo" style="display:none">↶ Undo</button>
   <button id="solve">▶ Let the AI plan it</button>
   <button id="go">🛷 Deliver!</button>
   <label>Speed <input id="spd" type="range" min="0.25" max="4" step="0.05" value="1"></label>
@@ -40,7 +41,8 @@
 <script>
 // Santa has one night and N chimneys. Which order is shortest? That's the travelling
 // salesman problem. Here a simulated-annealing search untangles a random route live.
-const MW = 1000, MH = 640, KM = 0.02;               // world size in units; 1 unit = 20 m
+let MW = 1000, MH = 640;                            // world size in units (turned upright on tall phone screens)
+const KM = 0.02;                                    // 1 unit = 20 m
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const bg = document.createElement('canvas'), bctx = bg.getContext('2d');
 const chart = document.getElementById('chart'), cctx = chart.getContext('2d');
@@ -56,9 +58,11 @@ let mode = 'idle', step = 0, TOTAL = 1, T0 = 1, T1 = 1, temp = 0, hist = [];
 let mine = [], mineLen = null, lit, presents = [], deliver = null;
 
 function makeVillage(count, seed) {
+  [MW, MH] = innerHeight > innerWidth * 1.1 ? [640, 1000] : [1000, 640];
+  size();
   const r = mulberry(seed);
   const g = () => { let u = 0; for (let i = 0; i < 4; i++) u += r(); return (u - 2) / 0.577; };   // ~N(0,1)
-  lake = { x: 200 + r() * 600, y: 180 + r() * 280, rx: 70 + r() * 60, ry: 40 + r() * 30 };
+  lake = { x: MW * (0.25 + r() * 0.5), y: MH * (0.3 + r() * 0.4), rx: 70 + r() * 60, ry: 40 + r() * 30 };
   const inLake = (x, y, m) => ((x - lake.x) / (lake.rx + m)) ** 2 + ((y - lake.y) / (lake.ry + m)) ** 2 < 1;
   const k = Math.round(count / 14) + 2, centres = [];
   for (let i = 0; i < k; i++) centres.push({ x: 90 + r() * (MW - 180), y: 80 + r() * (MH - 160) });
@@ -160,7 +164,7 @@ const W2S = (x, y) => [ox + x * sc, oy + y * sc];
 function size() {
   DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
   cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  const topPad = 92, botPad = 64;
+  const phone = W < 640, topPad = phone ? 160 : 92, botPad = phone ? 130 : 64;
   sc = Math.max(0.05, Math.min((W - 24) / MW, (H - topPad - botPad) / MH));
   ox = (W - MW * sc) / 2; oy = topPad + (H - topPad - botPad - MH * sc) / 2;
   chart.width = 260 * DPR; chart.height = 90 * DPR; cctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -290,6 +294,7 @@ function setMode(m) {
   mode = m;
   $('solve').classList.toggle('on', m === 'solve');
   $('draw').classList.toggle('on', m === 'draw');
+  $('undo').style.display = m === 'draw' ? '' : 'none';
   $('go').classList.toggle('on', m === 'deliver');
   chart.style.display = (m === 'solve' || hist.length) ? 'block' : 'none';
 }
@@ -349,13 +354,14 @@ cv.addEventListener('contextmenu', e => { e.preventDefault(); undo(); });
 function undo() { if (mode === 'draw' && mine.length > 1) { mine.pop(); stats(); } }
 addEventListener('keydown', e => { if (e.key === 'Backspace' || (e.key === 'z' && (e.ctrlKey || e.metaKey))) undo(); });
 
-$('newv').onclick = () => makeVillage(+$('count').value, (Math.random() * 1e9) | 0);
+$('undo').onclick = undo;
+$('newv').onclick =() => makeVillage(+$('count').value, (Math.random() * 1e9) | 0);
 $('count').onchange = () => makeVillage(+$('count').value, (Math.random() * 1e9) | 0);
 $('solve').onclick = () => { if (mode === 'solve') return; deliver = null; lit = new Uint8Array(n); startSolve(); };
 $('draw').onclick = () => {
   if (mode === 'solve') return;
   deliver = null; lit = new Uint8Array(n); mine = [0]; mineLen = null; setMode('draw'); stats();
-  say('Start at the workshop ★. Click or drag across houses in the order Santa should visit. Right-click or Backspace undoes.');
+  say('Start at the workshop ★. Click or drag across houses in the order Santa should visit. ↶ Undo (or right-click) takes a step back.');
 };
 $('go').onclick = () => { if (mode !== 'solve') startDeliver(); };
 $('snd').onclick = () => {

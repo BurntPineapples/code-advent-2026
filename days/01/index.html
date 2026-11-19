@@ -10,6 +10,8 @@
   .back { position:fixed; top:12px; left:12px; z-index:2; color:#fffb; text-decoration:none; font-size:14px; background:#0007; padding:6px 10px; border-radius:8px; }
   .hint { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); font-size:13px; color:#cfe0ff99; text-align:center; width:max-content; max-width:92vw; transition:opacity 1s; pointer-events:none; }
   form { position:fixed; top:12px; right:12px; z-index:2; display:flex; gap:6px; }
+  #shake { position:fixed; right:12px; bottom:12px; z-index:2; background:#0008; color:#fff; border:1px solid #ffffff2a; border-radius:8px; padding:6px 10px; font:inherit; font-size:14px; cursor:pointer; }
+  @media (max-width:640px) { .hint { bottom:56px; } }
   input { width:min(200px,40vw); background:#0008; border:1px solid #ffffff2a; color:#fff; border-radius:8px; padding:6px 10px; font:inherit; font-size:14px; }
 </style>
 </head>
@@ -17,7 +19,8 @@
 <a class="back" href="../../">← Calendar</a>
 <form id="f"><input id="msg" maxlength="40" placeholder="Hide your own message…" aria-label="Your hidden message"></form>
 <canvas id="c"></canvas>
-<div class="hint" id="hint">Something is hiding in the snow. Wait for it…<br>Drag to brush the snow away · Space or double-click to shake it all off</div>
+<button id="shake">Shake ❄</button>
+<div class="hint" id="hint">Something is hiding in the snow. Wait for it…<br>Drag to brush the snow away · Space, double-click or Shake to knock it all off</div>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const CELL = 4;                         // size of one snow "grain" in CSS pixels
@@ -181,6 +184,7 @@ cv.addEventListener('pointerdown', e => { mouse.down = true; cv.setPointerCaptur
 addEventListener('pointerup', () => { mouse.down = false; mouse.vx = 0; });
 cv.addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e9; mouse.vx = 0; });
 cv.addEventListener('dblclick', shake);
+document.getElementById('shake').onclick = shake;
 addEventListener('keydown', e => { if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); shake(); } });
 document.getElementById('f').addEventListener('submit', e => {
   e.preventDefault();

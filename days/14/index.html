@@ -140,7 +140,8 @@ const bar = document.getElementById('bar');
 function size() {
   DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
   cv.width = W * DPR; cv.height = H * DPR;
-  scale = Math.min(W / VW, (H - 250) / VH); offX = (W - VW * scale) / 2; offY = 50;   // leave room for the brain and chart
+  offY = W < 640 ? 92 : 50;                                   // phones: clear the wrapped button row
+  scale = Math.min(W / VW, (H - 200 - offY) / VH); offX = (W - VW * scale) / 2;   // leave room for the brain and chart
 }
 const stars = Array.from({ length: 90 }, () => [Math.random() * VW, Math.random() * GROUND * 0.8, Math.random()]);
 function drawDeer(y, vy, alpha, special) {
@@ -189,7 +190,12 @@ function draw() {
   const alive = deer.filter(d => d.alive).length, score = lead ? lead.passed : 0;
   ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(14, 20 * scale)}px system-ui`; ctx.textAlign = 'left';
   const hudY = offY + 26 * scale + 4;
-  if (mode === 'train') ctx.fillText(`Generation ${gen} · ${alive}/${POP} still flying · chimneys passed: ${score} · best ever: ${bestEver.passed || 0}`, offX + 12, hudY);
+  if (W < 640) {                 // phones: two short lines instead of one long one
+    ctx.font = 'bold 13px system-ui';
+    const [a, b] = mode === 'train' ? [`Generation ${gen} · ${alive}/${POP} flying`, `passed ${score} · best ever ${bestEver.passed || 0}`]
+                                    : ['RACE! Tap to flap', `You ${player ? player.passed : '–'} · Champion ${deer[0].passed}`];
+    ctx.fillText(a, offX + 8, offY + 16); ctx.fillText(b, offX + 8, offY + 33);
+  } else if (mode === 'train') ctx.fillText(`Generation ${gen} · ${alive}/${POP} still flying · chimneys passed: ${score} · best ever: ${bestEver.passed || 0}`, offX + 12, hudY);
   else ctx.fillText(`RACE! Space / tap to flap · You: ${player ? player.passed : '–'} · Champion: ${deer[0].passed}`, offX + 12, hudY);
   if (raceResultT > 0) { ctx.fillStyle = '#ffcf6e'; ctx.textAlign = 'center'; ctx.font = 'bold 28px system-ui'; ctx.fillText(raceResult, W / 2, offY + VH * scale / 2); }
   drawBrain(lead); drawChart();

@@ -197,7 +197,9 @@ buttons('finishes', Object.keys(FINISHES), f => { finishName = f; rebuild(); }, 
 
 function resize() {
   const w = innerWidth, h = innerHeight; renderer.setSize(w, h); camera.aspect = w / h;
-  if (w > 640) camera.setViewOffset(w, h, -135, 0, w, h); else camera.clearViewOffset();   // keep the ornament clear of the side panel
+  // keep the ornament clear of the panel: beside it on wide screens, above it on phones
+  if (w > 640) { camera.setViewOffset(w, h, -135, 0, w, h); camera.zoom = 1; }
+  else { camera.setViewOffset(w, h, 0, h * 0.22, w, h); camera.zoom = Math.min(1, w / h * 1.3); }
   camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();

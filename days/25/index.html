@@ -76,6 +76,7 @@ const group = new THREE.Group(); scene.add(group);
 
 // ---------- shapes: every shape is N points with N colours ----------
 const N = innerWidth < 700 ? 32000 : 60000;
+const camZ = a => Math.max(14, 3.9 / (0.384 * a));     // back the camera off just enough that the tree fits the width
 const BASE = -3.3, HT = 7.0, RAD = 2.9, TOP = BASE + HT;
 const col = new THREE.Color();
 const R = Math.random;
@@ -172,11 +173,13 @@ function makeText() {
   const d = x.getImageData(0, 0, 1024, 512).data, px = [];
   for (let yy = 0; yy < 512; yy += 2) for (let xx = 0; xx < 1024; xx += 2) if (d[(yy * 1024 + xx) * 4 + 3] > 128) px.push(xx, yy);
   const s = shape(), M = px.length / 2;
+  // on a tall phone screen the words would run off the sides, so shrink them to fit
+  const a = innerWidth / innerHeight, visW = 2 * Math.tan(21 * Math.PI / 180) * camZ(a) * a, fit = Math.min(1, visW * 0.92 / 11.5);
   for (let i = 0; i < N; i++) {
     const k = (R() * M) | 0, X = px[k * 2] + R() * 2, Y = px[k * 2 + 1] + R() * 2;
     const line1 = Y < 256 - fs * 0.04, t = X / 1024;
     line1 ? col.setRGB(1, 0.25 + t * 0.55, 0.2 + t * 0.15) : col.setRGB(1, 0.8 + t * 0.2, 0.45 + t * 0.5);
-    put(s, i, (X - 512) / 1024 * 11.5, (256 - Y) / 1024 * 11.5 + 0.5, (R() - 0.5) * 0.25, col.multiplyScalar(0.8));
+    put(s, i, (X - 512) / 1024 * 11.5 * fit, (256 - Y) / 1024 * 11.5 * fit + 0.5, (R() - 0.5) * 0.25, col.multiplyScalar(0.8));
   }
   return s;
 }
@@ -298,7 +301,7 @@ composer.addPass(new OutputPass());
 function resize() {
   const w = innerWidth, h = innerHeight; renderer.setSize(w, h); composer.setSize(w, h);
   camera.aspect = w / h;
-  camera.position.set(0, 0.7, Math.max(14, 6.6 / (0.384 * camera.aspect))); camera.lookAt(0, 0.35, 0);
+  camera.position.set(0, 0.7, camZ(camera.aspect)); camera.lookAt(0, 0.35, 0);
   camera.updateProjectionMatrix();
   U.uPx.value = 34 * renderer.getPixelRatio() * (h / 900);
 }

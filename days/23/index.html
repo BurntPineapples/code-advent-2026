@@ -26,6 +26,11 @@
   .l { white-space:pre-wrap; word-break:break-word; min-height:1.25em; }
   .dim { opacity:.6; } .err { color:#ff6a5a; text-shadow:0 0 6px #ff3b2a99; } .hi { color:#fff; text-shadow:0 0 6px var(--fg), 0 0 18px var(--glow); }
   #line { display:flex; white-space:pre; }
+  .ban { white-space:pre; word-break:normal; font-size:min(1em, 2.6vw); line-height:1.1; }
+  @media (max-width:640px) {
+    #crt { inset:8px; border-radius:16px; }
+    #screen { padding:44px 10px 16px; font-size:14px; }
+  }
   #in { flex:1; background:transparent; border:0; outline:0; color:var(--fg); font:inherit; text-shadow:inherit; caret-color:var(--fg); padding:0; margin:0; }
   #snowc { position:absolute; inset:0; pointer-events:none; z-index:2; }
   #sleigh { position:absolute; left:100%; top:18%; margin:0; z-index:2; color:var(--fg); font:clamp(14px,2.2vmin,20px)/1.1 "VT323",monospace; text-shadow:0 0 4px var(--fg), 0 0 16px var(--glow); pointer-events:none; white-space:pre; }
@@ -631,7 +636,7 @@ function boot() {
   later(() => { bar = document.createElement('div'); bar.className = 'l'; outEl.appendChild(bar); }, 200);
   for (let i = 0; i <= 24; i++) later(() => { bar.textContent = 'Loading SLEIGH-OS [' + '#'.repeat(i) + ' '.repeat(24 - i) + '] ' + Math.round(i / 24 * 100) + '%'; if (i % 4 === 0) click(); }, 45 + Math.random() * 60);
   out('', '', 300);
-  out(banner(), 'hi', 30);
+  out(banner(), 'hi ban', 30);
   out('', '', 100);
   out('northpole login: guest', '', 500);
   out('Last login: Dec 24 1987 on tty1 (from the chimney)', 'dim', 300);
